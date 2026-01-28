@@ -277,12 +277,10 @@ fn parse_cli_status(raw: &str) -> Result<CliStatusSnapshot, String> {
 
 fn strip_ansi_codes(text: &str) -> String {
     // CSI sequences: ESC [ ... ending in 0x40–0x7E
-    let re = Regex::new(r"\x1b\[[0-?]*[ -/]*[@-~]").unwrap_or_else(|_| {
-        // Fallback: this pattern is a compile-time constant so should always succeed,
-        // but just in case, return a regex that matches nothing.
-        Regex::new(r"(?!x)x").expect("fallback regex is valid")
-    });
-    re.replace_all(text, "").to_string()
+    match Regex::new(r"\x1b\[[0-?]*[ -/]*[@-~]") {
+        Ok(re) => re.replace_all(text, "").to_string(),
+        Err(_) => text.to_string(),
+    }
 }
 
 fn parse_credits(text: &str) -> Option<f64> {
@@ -527,8 +525,10 @@ fn save_oauth_credentials(credentials: &OAuthCredentials) -> Result<(), String> 
     let auth_path = codex_home_dir().join("auth.json");
 
     let mut json: serde_json::Value = if auth_path.exists() {
-        let contents = fs::read_to_string(&auth_path).unwrap_or_else(|_| "{}".to_string());
-        serde_json::from_str(&contents).unwrap_or(serde_json::json!({}))
+        let contents = fs::read_to_string(&auth_path)
+            .map_err(|error| format!("Failed to read auth.json for save: {error}"))?;
+        serde_json::from_str(&contents)
+            .map_err(|error| format!("Failed to parse existing auth.json: {error}"))?
     } else {
         serde_json::json!({})
     };

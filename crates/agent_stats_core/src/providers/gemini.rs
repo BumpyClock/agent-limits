@@ -823,13 +823,14 @@ fn parse_iso8601_datetime(input: &str) -> Option<OffsetDateTime> {
 
     // Try without fractional seconds by trimming fractional part
     if let Some(dot_pos) = input.rfind('.') {
-        if let Some(z_pos) = input[dot_pos..].find('Z') {
+        let after_dot = &input[dot_pos..];
+        if after_dot.contains('Z') {
             let without_frac = format!("{}Z", &input[..dot_pos]);
             if let Ok(parsed) = OffsetDateTime::parse(&without_frac, &Rfc3339) {
                 return Some(parsed);
             }
-        } else if let Some(plus_pos) = input[dot_pos..].find('+') {
-            let without_frac = format!("{}{}", &input[..dot_pos], &input[dot_pos + plus_pos..]);
+        } else if let Some(plus_pos) = after_dot.find('+') {
+            let without_frac = format!("{}{}", &input[..dot_pos], &after_dot[plus_pos..]);
             if let Ok(parsed) = OffsetDateTime::parse(&without_frac, &Rfc3339) {
                 return Some(parsed);
             }
@@ -884,5 +885,599 @@ impl<T> LogErrQuietly for Result<T, String> {
         if let Err(error) = self {
             log::warn!("Gemini credential update: {error}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- Auth type ---
+
+    #[test]
+    fn test_read_auth_type_missing_settings() {
+        let temp = std::env::temp_dir().join("gemini_test_no_settings");
+        let _ = std::fs::create_dir_all(&temp);
+        assert_eq!(read_auth_type(&temp), AuthType::Unknown);
+    }
+
+    // --- JWT claims extraction ---
+
+    #[test]
+    fn test_extract_claims_valid_token() {
+        let header = base64_url_encode(r#"{"alg":"RS256","typ":"JWT"}"#);
+        let payload = base64_url_encode(r#"{"email":"user@corp.com","hd":"corp.com"}"#);
+        let token = format!("{header}.{payload}.signature");
+
+        let claims = extract_claims_from_id_token(Some(&token));
+        assert_eq!(claims.email.as_deref(), Some("user@corp.com"));
+        assert_eq!(claims.hosted_domain.as_deref(), Some("corp.com"));
+    }
+
+    #[test]
+    fn test_extract_claims_email_only() {
+        let header = base64_url_encode(r#"{"alg":"RS256"}"#);
+        let payload = base64_url_encode(r#"{"email":"user@gmail.com"}"#);
+        let token = format!("{header}.{payload}.sig");
+
+        let claims = extract_claims_from_id_token(Some(&token));
+        assert_eq!(claims.email.as_deref(), Some("user@gmail.com"));
+        assert!(claims.hosted_domain.is_none());
+    }
+
+    #[test]
+    fn test_extract_claims_none() {
+        let claims = extract_claims_from_id_token(None);
+        assert!(claims.email.is_none());
+        assert!(claims.hosted_domain.is_none());
+    }
+
+    #[test]
+    fn test_extract_claims_empty() {
+        let claims = extract_claims_from_id_token(Some(""));
+        assert!(claims.email.is_none());
+    }
+
+    #[test]
+    fn test_extract_claims_invalid_parts() {
+        let claims = extract_claims_from_id_token(Some("not-a-jwt"));
+        assert!(claims.email.is_none());
+    }
+
+    #[test]
+    fn test_extract_claims_invalid_base64() {
+        let claims = extract_claims_from_id_token(Some("header.!!!invalid!!!.sig"));
+        assert!(claims.email.is_none());
+    }
+
+    // --- Base64 URL decode ---
+
+    #[test]
+    fn test_base64_url_decode_simple() {
+        let decoded = base64_url_decode("dGVzdA");
+        assert_eq!(decoded, Some(b"test".to_vec()));
+    }
+
+    #[test]
+    fn test_base64_url_decode_with_padding_chars() {
+        // "test" with explicit padding stripped
+        let decoded = base64_url_decode("dGVzdA");
+        assert!(decoded.is_some());
+        assert_eq!(String::from_utf8(decoded.expect("decoded")).ok(), Some("test".to_string()));
+    }
+
+    // --- Project ID extraction from Code Assist ---
+
+    #[test]
+    fn test_extract_project_id_string() {
+        let json: Value = serde_json::json!({
+            "cloudaicompanionProject": "gen-lang-client-12345"
+        });
+        assert_eq!(
+            extract_project_id_from_code_assist(&json),
+            Some("gen-lang-client-12345".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_project_id_object_with_id() {
+        let json: Value = serde_json::json!({
+            "cloudaicompanionProject": { "id": "gen-lang-client-99" }
+        });
+        assert_eq!(
+            extract_project_id_from_code_assist(&json),
+            Some("gen-lang-client-99".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_project_id_object_with_project_id() {
+        let json: Value = serde_json::json!({
+            "cloudaicompanionProject": { "projectId": "gen-lang-client-42" }
+        });
+        assert_eq!(
+            extract_project_id_from_code_assist(&json),
+            Some("gen-lang-client-42".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_project_id_empty_string() {
+        let json: Value = serde_json::json!({
+            "cloudaicompanionProject": "   "
+        });
+        assert_eq!(extract_project_id_from_code_assist(&json), None);
+    }
+
+    #[test]
+    fn test_extract_project_id_missing() {
+        let json: Value = serde_json::json!({});
+        assert_eq!(extract_project_id_from_code_assist(&json), None);
+    }
+
+    #[test]
+    fn test_extract_project_id_null() {
+        let json: Value = serde_json::json!({
+            "cloudaicompanionProject": null
+        });
+        assert_eq!(extract_project_id_from_code_assist(&json), None);
+    }
+
+    // --- Plan detection ---
+
+    #[test]
+    fn test_determine_plan_standard() {
+        assert_eq!(
+            determine_plan(&Some(GeminiTier::Standard), &None),
+            Some("Paid".to_string())
+        );
+    }
+
+    #[test]
+    fn test_determine_plan_free_with_domain() {
+        assert_eq!(
+            determine_plan(&Some(GeminiTier::Free), &Some("corp.com".to_string())),
+            Some("Workspace".to_string())
+        );
+    }
+
+    #[test]
+    fn test_determine_plan_free_personal() {
+        assert_eq!(
+            determine_plan(&Some(GeminiTier::Free), &None),
+            Some("Free".to_string())
+        );
+    }
+
+    #[test]
+    fn test_determine_plan_legacy() {
+        assert_eq!(
+            determine_plan(&Some(GeminiTier::Legacy), &None),
+            Some("Legacy".to_string())
+        );
+    }
+
+    #[test]
+    fn test_determine_plan_none() {
+        assert_eq!(determine_plan(&None, &None), None);
+    }
+
+    #[test]
+    fn test_determine_plan_standard_with_domain() {
+        assert_eq!(
+            determine_plan(&Some(GeminiTier::Standard), &Some("corp.com".to_string())),
+            Some("Paid".to_string())
+        );
+    }
+
+    // --- ISO 8601 datetime parsing ---
+
+    #[test]
+    fn test_parse_iso8601_valid() {
+        let result = parse_iso8601_datetime("2026-01-28T15:00:00Z");
+        assert!(result.is_some());
+        let date = result.expect("parsed");
+        assert_eq!(date.year(), 2026);
+        assert_eq!(date.month() as u8, 1);
+        assert_eq!(date.day(), 28);
+    }
+
+    #[test]
+    fn test_parse_iso8601_with_fractional_seconds() {
+        let result = parse_iso8601_datetime("2026-01-28T15:00:00.123Z");
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_parse_iso8601_empty() {
+        assert!(parse_iso8601_datetime("").is_none());
+    }
+
+    #[test]
+    fn test_parse_iso8601_invalid() {
+        assert!(parse_iso8601_datetime("not-a-date").is_none());
+    }
+
+    // --- Reset time formatting ---
+
+    #[test]
+    fn test_format_reset_time_future() {
+        let future = OffsetDateTime::now_utc() + time::Duration::hours(3) + time::Duration::minutes(15);
+        let iso = future.format(&time::format_description::well_known::Rfc3339)
+            .expect("format");
+        let result = format_reset_time(&iso);
+        assert!(result.starts_with("Resets in 3h"));
+    }
+
+    #[test]
+    fn test_format_reset_time_past() {
+        let past = OffsetDateTime::now_utc() - time::Duration::hours(1);
+        let iso = past.format(&time::format_description::well_known::Rfc3339)
+            .expect("format");
+        assert_eq!(format_reset_time(&iso), "Resets soon");
+    }
+
+    #[test]
+    fn test_format_reset_time_minutes_only() {
+        let future = OffsetDateTime::now_utc() + time::Duration::minutes(45);
+        let iso = future.format(&time::format_description::well_known::Rfc3339)
+            .expect("format");
+        let result = format_reset_time(&iso);
+        assert!(result.starts_with("Resets in "));
+        assert!(result.contains('m'));
+        assert!(!result.contains('h'));
+    }
+
+    #[test]
+    fn test_format_reset_time_invalid() {
+        assert_eq!(format_reset_time("not-a-date"), "Resets soon");
+    }
+
+    // --- JS constant extraction ---
+
+    #[test]
+    fn test_extract_js_string_constant_single_quotes() {
+        let content = "const OAUTH_CLIENT_ID = '123456.apps.googleusercontent.com';";
+        assert_eq!(
+            extract_js_string_constant(content, "OAUTH_CLIENT_ID"),
+            Some("123456.apps.googleusercontent.com".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_js_string_constant_double_quotes() {
+        let content = r#"const OAUTH_CLIENT_SECRET = "GOCSPX-secret-value";"#;
+        assert_eq!(
+            extract_js_string_constant(content, "OAUTH_CLIENT_SECRET"),
+            Some("GOCSPX-secret-value".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_js_string_constant_with_spaces() {
+        let content = "const OAUTH_CLIENT_ID   =   'my-client-id' ;";
+        assert_eq!(
+            extract_js_string_constant(content, "OAUTH_CLIENT_ID"),
+            Some("my-client-id".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_js_string_constant_empty_value() {
+        let content = "const OAUTH_CLIENT_ID = '';";
+        assert_eq!(extract_js_string_constant(content, "OAUTH_CLIENT_ID"), None);
+    }
+
+    #[test]
+    fn test_extract_js_string_constant_missing() {
+        assert_eq!(extract_js_string_constant("nothing here", "MISSING"), None);
+    }
+
+    #[test]
+    fn test_parse_oauth_credentials_from_source() {
+        let content = r#"
+            const OAUTH_CLIENT_ID = '123.apps.googleusercontent.com';
+            const OAUTH_CLIENT_SECRET = 'GOCSPX-abcdef';
+        "#;
+        let creds = parse_oauth_credentials_from_source(content);
+        assert!(creds.is_some());
+        let creds = creds.expect("creds");
+        assert_eq!(creds.client_id, "123.apps.googleusercontent.com");
+        assert_eq!(creds.client_secret, "GOCSPX-abcdef");
+    }
+
+    #[test]
+    fn test_parse_oauth_credentials_missing_secret() {
+        let content = "const OAUTH_CLIENT_ID = 'id';";
+        assert!(parse_oauth_credentials_from_source(content).is_none());
+    }
+
+    // --- Quota parsing (via fetch_quota internals) ---
+
+    #[test]
+    fn test_quota_bucket_deserialization() {
+        let json = r#"{
+            "buckets": [
+                {
+                    "remainingFraction": 0.6,
+                    "resetTime": "2026-01-28T20:00:00Z",
+                    "modelId": "gemini-2.5-pro",
+                    "tokenType": "INPUT"
+                },
+                {
+                    "remainingFraction": 0.9,
+                    "resetTime": "2026-01-28T20:00:00Z",
+                    "modelId": "gemini-2.5-flash",
+                    "tokenType": "INPUT"
+                }
+            ]
+        }"#;
+
+        let response: QuotaResponse = serde_json::from_str(json).expect("parse");
+        let buckets = response.buckets.expect("buckets");
+        assert_eq!(buckets.len(), 2);
+        assert_eq!(buckets[0].model_id.as_deref(), Some("gemini-2.5-pro"));
+        assert_eq!(buckets[0].remaining_fraction, Some(0.6));
+        assert_eq!(buckets[1].model_id.as_deref(), Some("gemini-2.5-flash"));
+    }
+
+    #[test]
+    fn test_quota_response_empty_buckets() {
+        let json = r#"{"buckets": []}"#;
+        let response: QuotaResponse = serde_json::from_str(json).expect("parse");
+        assert!(response.buckets.as_ref().expect("buckets").is_empty());
+    }
+
+    #[test]
+    fn test_quota_response_no_buckets_field() {
+        let json = r#"{}"#;
+        let response: QuotaResponse = serde_json::from_str(json).expect("parse");
+        assert!(response.buckets.is_none());
+    }
+
+    // --- Model grouping (lowest per model) ---
+
+    #[test]
+    fn test_model_grouping_keeps_lowest_fraction() {
+        let buckets = vec![
+            QuotaBucket {
+                remaining_fraction: Some(0.8),
+                reset_time: None,
+                model_id: Some("gemini-2.5-pro".to_string()),
+                token_type: Some("INPUT".to_string()),
+            },
+            QuotaBucket {
+                remaining_fraction: Some(0.3),
+                reset_time: Some("2026-01-28T22:00:00Z".to_string()),
+                model_id: Some("gemini-2.5-pro".to_string()),
+                token_type: Some("OUTPUT".to_string()),
+            },
+        ];
+
+        let mut model_map: HashMap<String, (f64, Option<String>)> = HashMap::new();
+        for bucket in &buckets {
+            let model_id = bucket.model_id.clone().expect("model_id");
+            let fraction = bucket.remaining_fraction.expect("fraction");
+            let entry = model_map.entry(model_id);
+            match entry {
+                std::collections::hash_map::Entry::Occupied(mut occupied) => {
+                    if fraction < occupied.get().0 {
+                        occupied.insert((fraction, bucket.reset_time.clone()));
+                    }
+                }
+                std::collections::hash_map::Entry::Vacant(vacant) => {
+                    vacant.insert((fraction, bucket.reset_time.clone()));
+                }
+            }
+        }
+
+        assert_eq!(model_map.len(), 1);
+        let (fraction, _) = model_map.get("gemini-2.5-pro").expect("pro");
+        assert!((*fraction - 0.3).abs() < 0.01);
+    }
+
+    // --- Usage snapshot construction ---
+
+    #[test]
+    fn test_build_usage_snapshot_pro_and_flash() {
+        let now = OffsetDateTime::now_utc();
+        let quotas = vec![
+            ModelQuota {
+                model_id: "gemini-2.5-pro".to_string(),
+                percent_left: 60.0,
+                reset_time: None,
+                reset_description: Some("Resets in 5h 30m".to_string()),
+            },
+            ModelQuota {
+                model_id: "gemini-2.5-flash".to_string(),
+                percent_left: 90.0,
+                reset_time: None,
+                reset_description: Some("Resets in 3h 10m".to_string()),
+            },
+        ];
+
+        let snapshot = build_usage_snapshot(&quotas, Some("user@example.com"), Some("Paid"), now);
+
+        let primary = snapshot.primary.as_ref().expect("primary");
+        assert!((primary.used_percent - 40.0).abs() < 0.01);
+        assert_eq!(primary.window_minutes, Some(1440));
+
+        let secondary = snapshot.secondary.as_ref().expect("secondary");
+        assert!((secondary.used_percent - 10.0).abs() < 0.01);
+        assert_eq!(secondary.window_minutes, Some(1440));
+
+        assert!(snapshot.tertiary.is_none());
+
+        let identity = snapshot.identity.as_ref().expect("identity");
+        assert_eq!(identity.account_email.as_deref(), Some("user@example.com"));
+        assert_eq!(identity.login_method.as_deref(), Some("Paid"));
+        assert_eq!(identity.provider_id.as_deref(), Some("gemini"));
+    }
+
+    #[test]
+    fn test_build_usage_snapshot_pro_only() {
+        let now = OffsetDateTime::now_utc();
+        let quotas = vec![
+            ModelQuota {
+                model_id: "gemini-2.5-pro".to_string(),
+                percent_left: 75.0,
+                reset_time: None,
+                reset_description: None,
+            },
+        ];
+
+        let snapshot = build_usage_snapshot(&quotas, None, None, now);
+
+        assert!(snapshot.primary.is_some());
+        assert!(snapshot.secondary.is_none());
+
+        let primary = snapshot.primary.as_ref().expect("primary");
+        assert!((primary.used_percent - 25.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_build_usage_snapshot_flash_only() {
+        let now = OffsetDateTime::now_utc();
+        let quotas = vec![
+            ModelQuota {
+                model_id: "gemini-2.5-flash".to_string(),
+                percent_left: 50.0,
+                reset_time: None,
+                reset_description: None,
+            },
+        ];
+
+        let snapshot = build_usage_snapshot(&quotas, None, None, now);
+
+        assert!(snapshot.primary.is_none());
+        assert!(snapshot.secondary.is_some());
+
+        let secondary = snapshot.secondary.as_ref().expect("secondary");
+        assert!((secondary.used_percent - 50.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_build_usage_snapshot_no_matching_models() {
+        let now = OffsetDateTime::now_utc();
+        let quotas = vec![
+            ModelQuota {
+                model_id: "gemini-unknown-model".to_string(),
+                percent_left: 80.0,
+                reset_time: None,
+                reset_description: None,
+            },
+        ];
+
+        let snapshot = build_usage_snapshot(&quotas, None, None, now);
+        assert!(snapshot.primary.is_none());
+        assert!(snapshot.secondary.is_none());
+    }
+
+    #[test]
+    fn test_build_usage_snapshot_picks_lowest_pro() {
+        let now = OffsetDateTime::now_utc();
+        let quotas = vec![
+            ModelQuota {
+                model_id: "gemini-2.0-pro".to_string(),
+                percent_left: 80.0,
+                reset_time: None,
+                reset_description: None,
+            },
+            ModelQuota {
+                model_id: "gemini-2.5-pro".to_string(),
+                percent_left: 30.0,
+                reset_time: None,
+                reset_description: None,
+            },
+        ];
+
+        let snapshot = build_usage_snapshot(&quotas, None, None, now);
+        let primary = snapshot.primary.as_ref().expect("primary");
+        assert!((primary.used_percent - 70.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_build_usage_snapshot_boundary_values() {
+        let now = OffsetDateTime::now_utc();
+
+        // 0% left = 100% used
+        let quotas = vec![
+            ModelQuota {
+                model_id: "gemini-2.5-pro".to_string(),
+                percent_left: 0.0,
+                reset_time: None,
+                reset_description: None,
+            },
+        ];
+        let snapshot = build_usage_snapshot(&quotas, None, None, now);
+        let primary = snapshot.primary.as_ref().expect("primary");
+        assert!((primary.used_percent - 100.0).abs() < 0.01);
+
+        // 100% left = 0% used
+        let quotas = vec![
+            ModelQuota {
+                model_id: "gemini-2.5-pro".to_string(),
+                percent_left: 100.0,
+                reset_time: None,
+                reset_description: None,
+            },
+        ];
+        let snapshot = build_usage_snapshot(&quotas, None, None, now);
+        let primary = snapshot.primary.as_ref().expect("primary");
+        assert!(primary.used_percent.abs() < 0.01);
+    }
+
+    // --- Provider error helper ---
+
+    #[test]
+    fn test_provider_error() {
+        let error = provider_error("test message");
+        assert_eq!(error.code, 1);
+        assert_eq!(error.message, "test message");
+        assert_eq!(error.kind, Some("provider".to_string()));
+    }
+
+    // --- Base64 URL encode helper for tests ---
+
+    fn base64_url_encode(input: &str) -> String {
+        let encoded = base64_encode_standard(input.as_bytes());
+        encoded.replace('+', "-").replace('/', "_").trim_end_matches('=').to_string()
+    }
+
+    fn base64_encode_standard(input: &[u8]) -> String {
+        const TABLE: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+        let mut output = String::with_capacity((input.len() + 2) / 3 * 4);
+        let mut i = 0;
+
+        while i + 2 < input.len() {
+            let a = input[i];
+            let b = input[i + 1];
+            let c = input[i + 2];
+            output.push(TABLE[(a >> 2) as usize] as char);
+            output.push(TABLE[((a & 0x03) << 4 | b >> 4) as usize] as char);
+            output.push(TABLE[((b & 0x0f) << 2 | c >> 6) as usize] as char);
+            output.push(TABLE[(c & 0x3f) as usize] as char);
+            i += 3;
+        }
+
+        let remaining = input.len() - i;
+        if remaining == 1 {
+            let a = input[i];
+            output.push(TABLE[(a >> 2) as usize] as char);
+            output.push(TABLE[((a & 0x03) << 4) as usize] as char);
+            output.push('=');
+            output.push('=');
+        } else if remaining == 2 {
+            let a = input[i];
+            let b = input[i + 1];
+            output.push(TABLE[(a >> 2) as usize] as char);
+            output.push(TABLE[((a & 0x03) << 4 | b >> 4) as usize] as char);
+            output.push(TABLE[((b & 0x0f) << 2) as usize] as char);
+            output.push('=');
+        }
+
+        output
     }
 }

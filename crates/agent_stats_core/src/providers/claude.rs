@@ -180,10 +180,12 @@ fn map_oauth_usage(
     })?;
 
     let secondary = map_oauth_window(&usage.seven_day, Some(7 * 24 * 60));
-    let tertiary = map_oauth_window(
-        &usage.seven_day_sonnet.as_ref().or(usage.seven_day_opus.as_ref()),
-        Some(7 * 24 * 60),
-    );
+    let tertiary_source = if usage.seven_day_sonnet.is_some() {
+        &usage.seven_day_sonnet
+    } else {
+        &usage.seven_day_opus
+    };
+    let tertiary = map_oauth_window(tertiary_source, Some(7 * 24 * 60));
 
     let login_method = infer_plan_from_tier(credentials.rate_limit_tier.as_deref());
     let provider_cost = map_oauth_extra_usage(&usage.extra_usage, login_method.as_deref());
@@ -1650,7 +1652,7 @@ mod tests {
     #[test]
     fn test_find_matching_brace() {
         assert_eq!(find_matching_brace("{}"), Some(1));
-        assert_eq!(find_matching_brace("{\"a\":{}}"), Some(6));
+        assert_eq!(find_matching_brace("{\"a\":{}}"), Some(7));
         assert_eq!(find_matching_brace("{unclosed"), None);
     }
 
@@ -1760,5 +1762,169 @@ Org: My Team
         assert!(rescaled.is_some());
         let rescaled = rescaled.unwrap();
         assert!((rescaled.limit - 50000.0).abs() < 0.01);
+    }
+
+    // -----------------------------------------------------------------------
+    // Web API tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_extract_session_key_from_cookie_header() {
+        assert_eq!(
+            extract_session_key("sessionKey=sk-ant-abc123"),
+            Some("sk-ant-abc123".to_string())
+        );
+        assert_eq!(
+            extract_session_key("other=foo; sessionKey=sk-ant-xyz; bar=baz"),
+            Some("sk-ant-xyz".to_string())
+        );
+        assert_eq!(extract_session_key("sessionKey=not-valid"), None);
+        assert_eq!(extract_session_key("nokey=here"), None);
+        assert_eq!(extract_session_key(""), None);
+    }
+
+    #[test]
+    fn test_extract_session_key_bare_token() {
+        assert_eq!(
+            extract_session_key("sk-ant-bare-token"),
+            Some("sk-ant-bare-token".to_string())
+        );
+        // With semicolons it should not match as bare token
+        assert_eq!(extract_session_key("sk-ant-x; other=y"), None);
+    }
+
+    #[test]
+    fn test_parse_web_usage_response() {
+        let json: serde_json::Value = serde_json::from_str(
+            r#"{
+                "five_hour": {"utilization": 35.0, "resets_at": "2026-01-28T15:00:00Z"},
+                "seven_day": {"utilization": 20.5, "resets_at": "2026-02-03T00:00:00Z"},
+                "seven_day_sonnet": {"utilization": 10.0, "resets_at": "2026-02-03T00:00:00Z"}
+            }"#,
+        )
+        .expect("valid JSON");
+
+        let result = parse_web_usage_response(&json);
+        assert!(result.is_ok());
+        let data = result.unwrap();
+        assert!((data.primary.used_percent - 35.0).abs() < 0.01);
+        assert_eq!(data.primary.window_minutes, Some(300));
+        assert!(data.primary.resets_at.is_some());
+        assert!(data.secondary.is_some());
+        let secondary = data.secondary.unwrap();
+        assert!((secondary.used_percent - 20.5).abs() < 0.01);
+        assert!(data.tertiary.is_some());
+        let tertiary = data.tertiary.unwrap();
+        assert!((tertiary.used_percent - 10.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_parse_web_usage_response_integer_utilization() {
+        let json: serde_json::Value = serde_json::from_str(
+            r#"{"five_hour": {"utilization": 42, "resets_at": null}}"#,
+        )
+        .expect("valid JSON");
+
+        let result = parse_web_usage_response(&json);
+        assert!(result.is_ok());
+        let data = result.unwrap();
+        assert!((data.primary.used_percent - 42.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_parse_web_usage_response_missing_session() {
+        let json: serde_json::Value = serde_json::from_str(
+            r#"{"seven_day": {"utilization": 20.0}}"#,
+        )
+        .expect("valid JSON");
+
+        let result = parse_web_usage_response(&json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_web_window() {
+        let json: serde_json::Value = serde_json::from_str(
+            r#"{"seven_day": {"utilization": 55.5, "resets_at": "2026-02-03T00:00:00Z"}}"#,
+        )
+        .expect("valid JSON");
+
+        let window = parse_web_window(&json, "seven_day", Some(10080));
+        assert!(window.is_some());
+        let window = window.unwrap();
+        assert!((window.used_percent - 55.5).abs() < 0.01);
+        assert_eq!(window.window_minutes, Some(10080));
+        assert!(window.resets_at.is_some());
+    }
+
+    #[test]
+    fn test_parse_web_window_missing_key() {
+        let json: serde_json::Value = serde_json::from_str(r#"{}"#).expect("valid JSON");
+        assert!(parse_web_window(&json, "seven_day", None).is_none());
+    }
+
+    #[test]
+    fn test_parse_web_window_missing_utilization() {
+        let json: serde_json::Value = serde_json::from_str(
+            r#"{"seven_day": {"resets_at": "2026-02-03T00:00:00Z"}}"#,
+        )
+        .expect("valid JSON");
+        assert!(parse_web_window(&json, "seven_day", None).is_none());
+    }
+
+    #[test]
+    fn test_infer_plan_from_web_account() {
+        assert_eq!(
+            infer_plan_from_web_account(Some("max_5x"), None),
+            Some("Claude Max".to_string())
+        );
+        assert_eq!(
+            infer_plan_from_web_account(Some("pro"), None),
+            Some("Claude Pro".to_string())
+        );
+        assert_eq!(
+            infer_plan_from_web_account(Some("team_default"), None),
+            Some("Claude Team".to_string())
+        );
+        assert_eq!(
+            infer_plan_from_web_account(Some("enterprise"), None),
+            Some("Claude Enterprise".to_string())
+        );
+        assert_eq!(
+            infer_plan_from_web_account(Some("claude_tier"), Some("stripe")),
+            Some("Claude Pro".to_string())
+        );
+        assert_eq!(
+            infer_plan_from_web_account(Some("free"), None),
+            None
+        );
+        assert_eq!(infer_plan_from_web_account(None, None), None);
+    }
+
+    #[test]
+    fn test_web_organization_response_capabilities() {
+        let org = WebOrganizationResponse {
+            uuid: "test-uuid".to_string(),
+            name: Some("Test Org".to_string()),
+            capabilities: Some(vec!["chat".to_string(), "api".to_string()]),
+        };
+        assert!(org.has_chat_capability());
+        assert!(!org.is_api_only());
+
+        let api_only = WebOrganizationResponse {
+            uuid: "api-uuid".to_string(),
+            name: None,
+            capabilities: Some(vec!["api".to_string()]),
+        };
+        assert!(!api_only.has_chat_capability());
+        assert!(api_only.is_api_only());
+
+        let empty = WebOrganizationResponse {
+            uuid: "empty-uuid".to_string(),
+            name: None,
+            capabilities: None,
+        };
+        assert!(!empty.has_chat_capability());
+        assert!(!empty.is_api_only());
     }
 }

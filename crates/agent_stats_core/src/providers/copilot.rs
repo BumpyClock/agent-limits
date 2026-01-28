@@ -9,6 +9,8 @@ use serde::Deserialize;
 use time::OffsetDateTime;
 
 const COPILOT_API_URL: &str = "https://api.github.com/copilot_internal/user";
+
+// Device flow constants – used by the public device flow API below.
 const DEVICE_CODE_URL: &str = "https://github.com/login/device/code";
 const ACCESS_TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
 const VSCODE_CLIENT_ID: &str = "Iv1.b507a08c87ecfe98";
@@ -86,8 +88,10 @@ fn resolve_token(config_api_key: &Option<String>) -> Result<String, ProviderErro
 struct CopilotQuotaSnapshot {
     #[serde(default)]
     percent_remaining: f64,
+    #[allow(dead_code)]
     #[serde(default)]
     entitlement: Option<f64>,
+    #[allow(dead_code)]
     #[serde(default)]
     remaining: Option<f64>,
 }
