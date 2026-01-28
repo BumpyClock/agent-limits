@@ -1,9 +1,9 @@
 use crate::config::ProviderSourceMode;
-use crate::models::{ProviderIdentitySnapshot, ProviderPayload, ProviderStatusPayload, RateWindow, UsageSnapshot};
+use crate::models::{ProviderIdentitySnapshot, ProviderPayload, RateWindow, UsageSnapshot};
 use crate::provider_metadata::ProviderId;
 use super::{Provider, ProviderFetchContext};
 use serde_json::Value;
-use time::{Duration, OffsetDateTime};
+use time::OffsetDateTime;
 
 pub struct SyntheticProvider;
 
@@ -70,7 +70,6 @@ impl Provider for SyntheticProvider {
 }
 
 struct SyntheticQuotaEntry {
-    label: Option<String>,
     used_percent: f64,
     window_minutes: Option<i64>,
     resets_at: Option<OffsetDateTime>,
@@ -245,7 +244,7 @@ fn quota_objects_from(root: &Value) -> Vec<Value> {
 }
 
 fn parse_quota(payload: &Value) -> Option<SyntheticQuotaEntry> {
-    let label = first_string(payload, &[
+    let _label = first_string(payload, &[
         "name",
         "label",
         "type",
@@ -290,7 +289,7 @@ fn parse_quota(payload: &Value) -> Option<SyntheticQuotaEntry> {
             "consumed",
             "spent",
         ]);
-        let mut remaining = first_f64(payload, &["remaining", "left", "available", "balance"]);
+        let remaining = first_f64(payload, &["remaining", "left", "available", "balance"]);
 
         if limit.is_none() {
             if let (Some(used_value), Some(remaining_value)) = (used, remaining) {
@@ -302,12 +301,6 @@ fn parse_quota(payload: &Value) -> Option<SyntheticQuotaEntry> {
                 used = Some(limit_value - remaining_value);
             }
         }
-        if remaining.is_none() {
-            if let (Some(limit_value), Some(used_value)) = (limit, used) {
-                remaining = Some((limit_value - used_value).max(0.0));
-            }
-        }
-
         if let (Some(limit_value), Some(used_value)) = (limit, used) {
             if limit_value > 0.0 {
                 used_percent = Some((used_value / limit_value) * 100.0);
@@ -343,7 +336,6 @@ fn parse_quota(payload: &Value) -> Option<SyntheticQuotaEntry> {
     };
 
     Some(SyntheticQuotaEntry {
-        label,
         used_percent,
         window_minutes,
         resets_at,

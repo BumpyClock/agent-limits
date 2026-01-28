@@ -4,3 +4,7 @@
   What I tried: Used `gpui::rgba(r,g,b,a)` and `.padding(...)`, and left `Render` returning `AnyElement` directly.
   Outcome: Build failed with gpui color API mismatch and missing `padding` (expects `.paddings`) plus Render signature mismatch.
   Next time: Use `gpui::rgba(0xRRGGBBAA)`/`gpui::rgb(0xRRGGBB)` and `.paddings(...)`, and keep Render signature as `impl IntoElement` with `AnyElement` wrapped.
+- Context: Started Rust provider porting with Synthetic.
+  What I tried: Implemented a native provider registry + Synthetic API fetcher with tolerant JSON parsing and API key lookup.
+  Outcome: Works with `SYNTHETIC_API_KEY` or config `apiKey`, returns native payloads without codexbar CLI.
+  Next time: Prefer blocking HTTP (ureq) on background threads to avoid async runtime conflicts with GPUI.

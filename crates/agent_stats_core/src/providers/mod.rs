@@ -5,7 +5,13 @@ use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 use time::OffsetDateTime;
 
+mod antigravity;
+mod claude;
+mod codex;
+mod copilot;
+mod gemini;
 mod synthetic;
+mod zai;
 
 pub struct ProviderFetchContext {
     pub provider_id: ProviderId,
@@ -79,7 +85,13 @@ static REGISTRY: OnceLock<ProviderRegistry> = OnceLock::new();
 pub fn registry() -> &'static ProviderRegistry {
     REGISTRY.get_or_init(|| {
         let mut providers: HashMap<ProviderId, Arc<dyn Provider>> = HashMap::new();
+        providers.insert(ProviderId::Antigravity, Arc::new(antigravity::AntigravityProvider));
+        providers.insert(ProviderId::Claude, Arc::new(claude::ClaudeProvider));
+        providers.insert(ProviderId::Codex, Arc::new(codex::CodexProvider));
+        providers.insert(ProviderId::Copilot, Arc::new(copilot::CopilotProvider));
+        providers.insert(ProviderId::Gemini, Arc::new(gemini::GeminiProvider));
         providers.insert(ProviderId::Synthetic, Arc::new(synthetic::SyntheticProvider));
+        providers.insert(ProviderId::Zai, Arc::new(zai::ZaiProvider));
 
         let metadata = provider_metadata()
             .iter()

@@ -1,4 +1,4 @@
-use agent_stats_core::backend::{FetchRequest, fetch_usage};
+use agent_stats_core::backend::{FetchRequest, fetch_native_usage, fetch_usage};
 use agent_stats_core::config::{AppConfig, ProviderConfig};
 use agent_stats_core::models::{ProviderPayload, ProviderStatusIndicator, RateWindow, UsageSnapshot};
 use agent_stats_core::provider_metadata::{ProviderId, ProviderMetadata, provider_metadata};
@@ -132,11 +132,18 @@ impl AgentStatsApp {
         cx.notify();
 
         let include_status = self.settings.include_status;
+        let backend_mode = std::env::var("AGENT_STATS_BACKEND_MODE").unwrap_or_else(|_| "native".to_string());
+        let use_native = backend_mode != "codexbar";
         let task = cx.background_spawn(async move {
-            fetch_usage(FetchRequest {
+            let request = FetchRequest {
                 include_status,
                 ..Default::default()
-            })
+            };
+            if use_native {
+                fetch_native_usage(request)
+            } else {
+                fetch_usage(request)
+            }
         });
 
         cx.spawn(|this: WeakEntity<Self>, cx: &mut AsyncApp| {

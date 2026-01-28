@@ -1,4 +1,4 @@
-use agent_stats_core::backend::{FetchRequest, fetch_usage};
+use agent_stats_core::backend::{FetchRequest, fetch_native_usage, fetch_usage};
 use agent_stats_core::config::AppConfig;
 use clap::{Parser, Subcommand};
 
@@ -20,6 +20,8 @@ enum Commands {
         source: Option<String>,
         #[arg(long)]
         pretty: bool,
+        #[arg(long, default_value = "native")]
+        backend: String,
     },
     Config {
         #[command(subcommand)]
@@ -40,6 +42,7 @@ fn main() {
         provider: None,
         source: None,
         pretty: false,
+        backend: "native".to_string(),
     });
 
     match command {
@@ -48,8 +51,9 @@ fn main() {
             provider,
             source,
             pretty,
+            backend,
         } => {
-            if let Err(error) = run_usage(status, provider, source, pretty) {
+            if let Err(error) = run_usage(status, provider, source, pretty, backend) {
                 eprintln!("Error: {error}");
                 std::process::exit(1);
             }
@@ -68,6 +72,7 @@ fn run_usage(
     provider: Option<String>,
     source: Option<String>,
     pretty: bool,
+    backend: String,
 ) -> anyhow::Result<()> {
     let request = FetchRequest {
         include_status: status,
@@ -75,7 +80,11 @@ fn run_usage(
         source,
         pretty,
     };
-    let result = fetch_usage(request)?;
+    let result = if backend == "codexbar" {
+        fetch_usage(request)?
+    } else {
+        fetch_native_usage(request)?
+    };
     let output = if pretty {
         serde_json::to_string_pretty(&result.payloads)?
     } else {

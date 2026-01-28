@@ -199,7 +199,7 @@ pub fn config_path() -> Result<PathBuf> {
     }
 
     let home = dirs::home_dir().context("Could not resolve home directory")?;
-    Ok(home.join(".codexbar").join("config.json"))
+    Ok(home.join(".agent-status").join("config.json"))
 }
 
 fn ensure_parent_dir(path: &Path) -> Result<()> {

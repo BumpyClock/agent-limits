@@ -1,5 +1,5 @@
 use crate::config::{AppConfig, ProviderSourceMode};
-use crate::models::{ProviderErrorPayload, ProviderPayload};
+use crate::models::ProviderPayload;
 use crate::provider_metadata::provider_metadata;
 use crate::providers::{ProviderFetchContext, registry};
 use anyhow::{Context, Result};
@@ -125,7 +125,7 @@ pub fn fetch_native_usage(request: FetchRequest) -> Result<FetchResult> {
         }
 
         if let Some(filter) = &request.provider {
-            if filter != "all" && filter != provider_config.id.to_string() {
+            if filter != "all" && filter.as_str() != provider_config.id.to_string() {
                 continue;
             }
         }
@@ -147,7 +147,7 @@ pub fn fetch_native_usage(request: FetchRequest) -> Result<FetchResult> {
                 version: None,
                 source: source_override
                     .as_ref()
-                    .map(|mode| format!("{mode:?}").to_lowercase())
+                    .map(|mode| mode.as_str().to_string())
                     .unwrap_or_else(|| "native".to_string()),
                 status: None,
                 usage: None,
