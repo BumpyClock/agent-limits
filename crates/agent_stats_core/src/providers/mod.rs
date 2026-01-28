@@ -6,12 +6,23 @@ use std::sync::{Arc, OnceLock};
 use time::OffsetDateTime;
 
 mod antigravity;
+mod amp;
+mod augment;
 mod claude;
 mod codex;
 mod copilot;
+mod cursor;
+mod factory;
 mod gemini;
+mod jetbrains;
+mod kimi;
+mod kimik2;
+mod kiro;
+mod minimax;
+mod opencode;
 mod synthetic;
 mod zai;
+mod vertexai;
 
 pub struct ProviderFetchContext {
     pub provider_id: ProviderId,
@@ -86,11 +97,22 @@ pub fn registry() -> &'static ProviderRegistry {
     REGISTRY.get_or_init(|| {
         let mut providers: HashMap<ProviderId, Arc<dyn Provider>> = HashMap::new();
         providers.insert(ProviderId::Antigravity, Arc::new(antigravity::AntigravityProvider));
+        providers.insert(ProviderId::Amp, Arc::new(amp::AmpProvider));
+        providers.insert(ProviderId::Augment, Arc::new(augment::AugmentProvider));
         providers.insert(ProviderId::Claude, Arc::new(claude::ClaudeProvider));
         providers.insert(ProviderId::Codex, Arc::new(codex::CodexProvider));
         providers.insert(ProviderId::Copilot, Arc::new(copilot::CopilotProvider));
+        providers.insert(ProviderId::Cursor, Arc::new(cursor::CursorProvider));
+        providers.insert(ProviderId::Factory, Arc::new(factory::FactoryProvider));
         providers.insert(ProviderId::Gemini, Arc::new(gemini::GeminiProvider));
+        providers.insert(ProviderId::JetBrains, Arc::new(jetbrains::JetBrainsProvider));
+        providers.insert(ProviderId::Kimi, Arc::new(kimi::KimiProvider));
+        providers.insert(ProviderId::KimiK2, Arc::new(kimik2::KimiK2Provider));
+        providers.insert(ProviderId::Kiro, Arc::new(kiro::KiroProvider));
+        providers.insert(ProviderId::MiniMax, Arc::new(minimax::MiniMaxProvider));
+        providers.insert(ProviderId::OpenCode, Arc::new(opencode::OpenCodeProvider));
         providers.insert(ProviderId::Synthetic, Arc::new(synthetic::SyntheticProvider));
+        providers.insert(ProviderId::VertexAI, Arc::new(vertexai::VertexAIProvider));
         providers.insert(ProviderId::Zai, Arc::new(zai::ZaiProvider));
 
         let metadata = provider_metadata()

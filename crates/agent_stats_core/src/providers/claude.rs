@@ -332,13 +332,14 @@ struct OAuthCredentials {
     expires_at: Option<OffsetDateTime>,
     scopes: Vec<String>,
     rate_limit_tier: Option<String>,
+    from_environment: bool,
 }
 
 impl OAuthCredentials {
     fn is_expired(&self) -> bool {
         match self.expires_at {
             Some(expires_at) => OffsetDateTime::now_utc() >= expires_at,
-            None => true,
+            None => !self.from_environment,
         }
     }
 
@@ -366,9 +367,10 @@ fn load_oauth_credentials() -> Result<OAuthCredentials, String> {
             return Ok(OAuthCredentials {
                 access_token: token,
                 refresh_token: None,
-                expires_at: None, // Environment tokens don't expire
+                expires_at: None,
                 scopes,
                 rate_limit_tier: None,
+                from_environment: true,
             });
         }
     }
@@ -414,6 +416,7 @@ fn load_oauth_credentials() -> Result<OAuthCredentials, String> {
         expires_at,
         scopes: oauth.scopes.unwrap_or_default(),
         rate_limit_tier: oauth.rate_limit_tier,
+        from_environment: false,
     })
 }
 
@@ -1153,7 +1156,14 @@ fn extract_cli_field(text: &str, label: &str) -> Option<String> {
     let lower_text = text.to_lowercase();
     let lower_label = label.to_lowercase();
     let pos = lower_text.find(&lower_label)?;
-    let after = &text[pos + label.len()..];
+    // Advance past the label in the lowercased text first, then map back to the original text.
+    // Both `pos` and the label length are measured in the lowercased domain; for ASCII labels
+    // this matches the original, but for safety we index the lowercased text and then use
+    // char-count to find the equivalent position in the original.
+    let label_end_in_lower = pos + lower_label.len();
+    let char_offset = lower_text[..label_end_in_lower].chars().count();
+    let byte_offset: usize = text.char_indices().nth(char_offset).map(|(index, _)| index)?;
+    let after = &text[byte_offset..];
     let line_end = after.find('\n').unwrap_or(after.len());
     let value = after[..line_end].trim().to_string();
     if value.is_empty() {
@@ -1267,23 +1277,28 @@ fn extract_percent_near_labels(lines: &[&str], labels: &[&str]) -> Option<f64> {
 }
 
 fn parse_percent_from_line(line: &str) -> Option<f64> {
+    parse_percent_from_line_inner(line, false)
+}
+
+fn parse_percent_from_line_inner(line: &str, assume_remaining: bool) -> Option<f64> {
     // Look for patterns like "42%", "42.5 %", "42.5%"
+    // Uses char iteration to handle Unicode whitespace (e.g. non-breaking space) before '%',
+    // matching the Swift reference's \p{Zs}* pattern.
+    let chars: Vec<char> = line.chars().collect();
     let mut index = 0;
-    let bytes = line.as_bytes();
-    while index < bytes.len() {
-        // Find a digit sequence
-        if bytes[index].is_ascii_digit() {
+    while index < chars.len() {
+        if chars[index].is_ascii_digit() {
             let start = index;
-            while index < bytes.len() && (bytes[index].is_ascii_digit() || bytes[index] == b'.') {
+            while index < chars.len() && (chars[index].is_ascii_digit() || chars[index] == '.') {
                 index += 1;
             }
-            let number_str = &line[start..index];
-            // Skip optional whitespace
+            let number_str: String = chars[start..index].iter().collect();
+            // Skip optional whitespace (including Unicode separator spaces)
             let mut search = index;
-            while search < bytes.len() && bytes[search] == b' ' {
+            while search < chars.len() && chars[search].is_whitespace() {
                 search += 1;
             }
-            if search < bytes.len() && bytes[search] == b'%' {
+            if search < chars.len() && chars[search] == '%' {
                 if let Ok(value) = number_str.parse::<f64>() {
                     let clamped = value.clamp(0.0, 100.0);
                     let lower = line.to_lowercase();
@@ -1296,7 +1311,9 @@ fn parse_percent_from_line(line: &str) -> Option<f64> {
                     if remaining_keywords.iter().any(|keyword| lower.contains(keyword)) {
                         return Some(clamped);
                     }
-                    // Ambiguous: don't return unless assume-remaining context
+                    if assume_remaining {
+                        return Some(clamped);
+                    }
                     return None;
                 }
             }
@@ -1308,45 +1325,12 @@ fn parse_percent_from_line(line: &str) -> Option<f64> {
 
 fn all_percents_from_text(text: &str) -> Vec<f64> {
     text.lines()
-        .filter_map(|line| {
-            // For fallback, assume remaining when unclear
-            parse_percent_from_line_assume_remaining(line)
-        })
+        .filter_map(parse_percent_from_line_assume_remaining)
         .collect()
 }
 
 fn parse_percent_from_line_assume_remaining(line: &str) -> Option<f64> {
-    let mut index = 0;
-    let bytes = line.as_bytes();
-    while index < bytes.len() {
-        if bytes[index].is_ascii_digit() {
-            let start = index;
-            while index < bytes.len() && (bytes[index].is_ascii_digit() || bytes[index] == b'.') {
-                index += 1;
-            }
-            let number_str = &line[start..index];
-            let mut search = index;
-            while search < bytes.len() && bytes[search] == b' ' {
-                search += 1;
-            }
-            if search < bytes.len() && bytes[search] == b'%' {
-                if let Ok(value) = number_str.parse::<f64>() {
-                    let clamped = value.clamp(0.0, 100.0);
-                    let lower = line.to_lowercase();
-                    if ["used", "spent", "consumed"]
-                        .iter()
-                        .any(|keyword| lower.contains(keyword))
-                    {
-                        return Some((100.0 - clamped).max(0.0));
-                    }
-                    // Assume remaining for ambiguous lines
-                    return Some(clamped);
-                }
-            }
-        }
-        index += 1;
-    }
-    None
+    parse_percent_from_line_inner(line, true)
 }
 
 fn extract_reset_near_label(lines: &[&str], label: &str) -> Option<String> {
@@ -1358,15 +1342,22 @@ fn extract_reset_near_label(lines: &[&str], label: &str) -> Option<String> {
         if line_normalized.contains(&label_normalized) {
             let window_end = (index + 14).min(lines.len());
             for candidate in &lines[index..window_end] {
-                let lower = candidate.to_lowercase();
-                if let Some(pos) = lower.find("resets") {
-                    let raw = candidate[pos..].trim().to_string();
-                    return Some(clean_reset_line(&raw));
+                if let Some(reset_text) = extract_reset_from_line(candidate) {
+                    return Some(clean_reset_line(&reset_text));
                 }
             }
         }
     }
     None
+}
+
+fn extract_reset_from_line(line: &str) -> Option<String> {
+    let lower = line.to_lowercase();
+    let pos_in_lower = lower.find("resets")?;
+    // Map byte position from lowercased back to original using char count
+    let char_offset = lower[..pos_in_lower].chars().count();
+    let byte_offset: usize = line.char_indices().nth(char_offset).map(|(index, _)| index)?;
+    Some(line[byte_offset..].trim().to_string())
 }
 
 fn extract_reset_near_labels(lines: &[&str], labels: &[&str]) -> Option<String> {
@@ -1466,9 +1457,11 @@ fn parse_iso8601_datetime(text: &str) -> Option<OffsetDateTime> {
 }
 
 fn format_reset_date(date: &OffsetDateTime) -> String {
-    let format = time::format_description::parse("[month repr:short] [day] at [hour repr:12]:[minute][period case:lower]");
-    match format {
-        Ok(ref format) => date.format(format).unwrap_or_else(|_| date.to_string()),
+    let format_description = time::format_description::parse(
+        "[month repr:short] [day] at [hour repr:12]:[minute][period case:lower]",
+    );
+    match format_description {
+        Ok(format) => date.format(&format).unwrap_or_else(|_| date.to_string()),
         Err(_) => date.to_string(),
     }
 }
@@ -1492,7 +1485,12 @@ fn truncate_body(body: &str, max_length: usize) -> String {
         .trim()
         .to_string();
     if cleaned.len() > max_length {
-        format!("{}…", &cleaned[..max_length])
+        // Find a char boundary at or before max_length to avoid panicking on multi-byte chars
+        let truncation_point = (0..=max_length)
+            .rev()
+            .find(|&index| cleaned.is_char_boundary(index))
+            .unwrap_or(0);
+        format!("{}…", &cleaned[..truncation_point])
     } else {
         cleaned
     }
@@ -1926,5 +1924,90 @@ Org: My Team
         };
         assert!(!empty.has_chat_capability());
         assert!(!empty.is_api_only());
+    }
+
+    // -----------------------------------------------------------------------
+    // truncate_body UTF-8 safety
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_truncate_body_multibyte_safety() {
+        // "héllo" – 'é' is 2 bytes in UTF-8, so truncating at byte 2 would split it
+        let result = truncate_body("héllo", 2);
+        // Should truncate to "h" (1 char) rather than panicking
+        assert_eq!(result, "h…");
+    }
+
+    #[test]
+    fn test_truncate_body_emoji_safety() {
+        // "🎉ab" – '🎉' is 4 bytes
+        let result = truncate_body("🎉ab", 3);
+        // max_length=3 is inside the emoji, so it truncates before it
+        assert_eq!(result, "…");
+    }
+
+    // -----------------------------------------------------------------------
+    // Unicode whitespace before % (parity with Swift's \p{Zs}*)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_percent_unicode_whitespace() {
+        // Non-breaking space (U+00A0) before %
+        assert_eq!(
+            parse_percent_from_line("42\u{00A0}% remaining"),
+            Some(42.0)
+        );
+    }
+
+    #[test]
+    fn test_parse_percent_no_whitespace() {
+        assert_eq!(parse_percent_from_line("75% remaining"), Some(75.0));
+    }
+
+    // -----------------------------------------------------------------------
+    // extract_cli_field
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_extract_cli_field_basic() {
+        assert_eq!(
+            extract_cli_field("Account: user@example.com\nOrg: test", "Account:"),
+            Some("user@example.com".to_string())
+        );
+        assert_eq!(
+            extract_cli_field("Account: user@example.com\nOrg: test", "Org:"),
+            Some("test".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_cli_field_case_insensitive() {
+        assert_eq!(
+            extract_cli_field("ACCOUNT: user@example.com", "Account:"),
+            Some("user@example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_cli_field_missing() {
+        assert_eq!(extract_cli_field("no label here", "Account:"), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // extract_reset_from_line
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_extract_reset_from_line() {
+        let result = extract_reset_from_line("Resets at 3pm (America/New_York)");
+        assert_eq!(
+            result.as_deref(),
+            Some("Resets at 3pm (America/New_York)")
+        );
+    }
+
+    #[test]
+    fn test_extract_reset_from_line_no_reset() {
+        assert_eq!(extract_reset_from_line("75% remaining"), None);
     }
 }

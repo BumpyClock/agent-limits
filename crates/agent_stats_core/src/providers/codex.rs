@@ -713,8 +713,10 @@ struct WindowSnapshot {
 #[derive(Debug, Deserialize)]
 struct CreditDetails {
     #[serde(default)]
+    #[allow(dead_code)]
     has_credits: bool,
     #[serde(default)]
+    #[allow(dead_code)]
     unlimited: bool,
     balance: Option<CreditBalance>,
 }

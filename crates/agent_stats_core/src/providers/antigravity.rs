@@ -7,9 +7,12 @@ use crate::provider_metadata::ProviderId;
 use super::{Provider, ProviderFetchContext};
 use regex::Regex;
 use serde::Deserialize;
+use std::time::Duration;
 use time::OffsetDateTime;
 
 pub struct AntigravityProvider;
+
+const DEFAULT_TIMEOUT_SECS: u64 = 8;
 
 impl Provider for AntigravityProvider {
     fn id(&self) -> ProviderId {
@@ -24,14 +27,26 @@ impl Provider for AntigravityProvider {
         &self,
         _context: &ProviderFetchContext,
     ) -> Result<ProviderPayload, ProviderErrorPayload> {
-        let process_info = detect_process_info()?;
+        // Antigravity is macOS-only due to language_server_macos process
+        #[cfg(not(target_os = "macos"))]
+        {
+            return Err(provider_error(
+                "Antigravity is only available on macOS",
+            ));
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            let timeout = Duration::from_secs(DEFAULT_TIMEOUT_SECS);
+            let process_info = detect_process_info()?;
         let ports = listening_ports(process_info.pid)?;
-        let connect_port = find_working_port(&ports, &process_info.csrf_token)?;
+        let connect_port = find_working_port(&ports, &process_info.csrf_token, timeout)?;
 
         let request_context = RequestContext {
             https_port: connect_port,
             http_port: process_info.extension_port,
             csrf_token: process_info.csrf_token,
+            timeout,
         };
 
         let snapshot = fetch_quota(&request_context)?;
@@ -42,18 +57,19 @@ impl Provider for AntigravityProvider {
             .as_ref()
             .and_then(|identity| identity.account_email.clone());
 
-        Ok(ProviderPayload {
-            provider: ProviderId::Antigravity.to_string(),
-            account: account_email,
-            version: Some("running".to_string()),
-            source: "local".to_string(),
-            status: None,
-            usage: Some(snapshot),
-            credits: None,
-            antigravity_plan_info: plan_info,
-            openai_dashboard: None,
-            error: None,
-        })
+            Ok(ProviderPayload {
+                provider: ProviderId::Antigravity.to_string(),
+                account: account_email,
+                version: Some("running".to_string()),
+                source: "local".to_string(),
+                status: None,
+                usage: Some(snapshot),
+                credits: None,
+                antigravity_plan_info: plan_info,
+                openai_dashboard: None,
+                error: None,
+            })
+        }
     }
 }
 
@@ -199,10 +215,10 @@ fn parse_listening_ports(output: &str) -> Vec<u16> {
     };
     let mut ports: std::collections::BTreeSet<u16> = std::collections::BTreeSet::new();
     for captures in regex.captures_iter(output) {
-        if let Some(matched) = captures.get(1) {
-            if let Ok(port) = matched.as_str().parse::<u16>() {
-                ports.insert(port);
-            }
+        if let Some(matched) = captures.get(1)
+            && let Ok(port) = matched.as_str().parse::<u16>()
+        {
+            ports.insert(port);
         }
     }
     ports.into_iter().collect()
@@ -211,6 +227,7 @@ fn parse_listening_ports(output: &str) -> Vec<u16> {
 fn find_working_port(
     ports: &[u16],
     csrf_token: &str,
+    timeout: Duration,
 ) -> Result<u16, ProviderErrorPayload> {
     let unleash_path =
         "/exa.language_server_pb.LanguageServerService/GetUnleashData";
@@ -231,9 +248,12 @@ fn find_working_port(
     });
     let body_string = body.to_string();
 
+    let agent = build_agent(timeout);
+
     for &port in ports {
         let url = format!("https://127.0.0.1:{port}{unleash_path}");
-        let result = ureq::post(&url)
+        let result = agent
+            .post(&url)
             .set("Content-Type", "application/json")
             .set("Connect-Protocol-Version", "1")
             .set("X-Codeium-Csrf-Token", csrf_token)
@@ -261,6 +281,7 @@ struct RequestContext {
     https_port: u16,
     http_port: Option<u16>,
     csrf_token: String,
+    timeout: Duration,
 }
 
 const GET_USER_STATUS_PATH: &str =
@@ -280,34 +301,45 @@ fn default_request_body() -> String {
     .to_string()
 }
 
+fn build_agent(timeout: Duration) -> ureq::Agent {
+    ureq::AgentBuilder::new()
+        .timeout(timeout)
+        .build()
+}
+
 fn make_request(
     path: &str,
     body: &str,
     context: &RequestContext,
 ) -> Result<String, ProviderErrorPayload> {
+    let agent = build_agent(context.timeout);
+
     // Try HTTPS first
     let https_url = format!("https://127.0.0.1:{}{}", context.https_port, path);
-    match send_request(&https_url, body, &context.csrf_token) {
-        Ok(response) => return Ok(response),
+    match send_request(&agent, &https_url, body, &context.csrf_token) {
+        Ok(response) => Ok(response),
         Err(https_error) => {
             // Try HTTP fallback on extension port if available and different
-            if let Some(http_port) = context.http_port {
-                if http_port != context.https_port {
-                    let http_url = format!("http://127.0.0.1:{http_port}{path}");
-                    return send_request(&http_url, body, &context.csrf_token);
-                }
+            if let Some(http_port) = context.http_port
+                && http_port != context.https_port
+            {
+                let http_url = format!("http://127.0.0.1:{http_port}{path}");
+                send_request(&agent, &http_url, body, &context.csrf_token)
+            } else {
+                Err(https_error)
             }
-            Err(https_error)
         }
     }
 }
 
 fn send_request(
+    agent: &ureq::Agent,
     url: &str,
     body: &str,
     csrf_token: &str,
 ) -> Result<String, ProviderErrorPayload> {
-    let response = ureq::post(url)
+    let response = agent
+        .post(url)
         .set("Content-Type", "application/json")
         .set("Connect-Protocol-Version", "1")
         .set("X-Codeium-Csrf-Token", csrf_token)
@@ -345,20 +377,23 @@ fn fetch_quota(context: &RequestContext) -> Result<UsageSnapshot, ProviderErrorP
     // Primary: GetUserStatus
     match make_request(GET_USER_STATUS_PATH, &body, context) {
         Ok(response_text) => match parse_user_status_response(&response_text) {
-            Ok(snapshot) => return Ok(snapshot.to_usage_snapshot()?),
+            Ok(snapshot) => snapshot.to_usage_snapshot(),
             Err(error) => {
                 log::debug!("Antigravity GetUserStatus parse failed: {}", error.message);
+                // Fallback: GetCommandModelConfigs
+                let response_text = make_request(GET_COMMAND_MODEL_CONFIGS_PATH, &body, context)?;
+                let snapshot = parse_command_model_response(&response_text)?;
+                snapshot.to_usage_snapshot()
             }
         },
         Err(error) => {
             log::debug!("Antigravity GetUserStatus request failed: {}", error.message);
+            // Fallback: GetCommandModelConfigs
+            let response_text = make_request(GET_COMMAND_MODEL_CONFIGS_PATH, &body, context)?;
+            let snapshot = parse_command_model_response(&response_text)?;
+            snapshot.to_usage_snapshot()
         }
     }
-
-    // Fallback: GetCommandModelConfigs
-    let response_text = make_request(GET_COMMAND_MODEL_CONFIGS_PATH, &body, context)?;
-    let snapshot = parse_command_model_response(&response_text)?;
-    snapshot.to_usage_snapshot()
 }
 
 fn fetch_plan_info(
@@ -372,12 +407,12 @@ fn fetch_plan_info(
         ))
     })?;
 
-    if let Some(ref code) = response.code {
-        if let Some(error_message) = invalid_code(code) {
-            return Err(provider_error(&format!(
-                "Antigravity API error: {error_message}"
-            )));
-        }
+    if let Some(ref code) = response.code
+        && let Some(error_message) = invalid_code(code)
+    {
+        return Err(provider_error(&format!(
+            "Antigravity API error: {error_message}"
+        )));
     }
 
     let user_status = match response.user_status {
@@ -457,15 +492,10 @@ impl PlanInfo {
             self.plan_name.as_deref(),
             self.plan_short_name.as_deref(),
         ];
-        for candidate in candidates {
-            if let Some(value) = candidate {
-                let trimmed = value.trim();
-                if !trimmed.is_empty() {
-                    return Some(trimmed);
-                }
-            }
-        }
-        None
+        candidates.into_iter().flatten().find_map(|value| {
+            let trimmed = value.trim();
+            (!trimmed.is_empty()).then_some(trimmed)
+        })
     }
 }
 
@@ -663,12 +693,12 @@ fn parse_user_status_response(text: &str) -> Result<StatusSnapshot, ProviderErro
         ))
     })?;
 
-    if let Some(ref code) = response.code {
-        if let Some(error_message) = invalid_code(code) {
-            return Err(provider_error(&format!(
-                "Antigravity API error: {error_message}"
-            )));
-        }
+    if let Some(ref code) = response.code
+        && let Some(error_message) = invalid_code(code)
+    {
+        return Err(provider_error(&format!(
+            "Antigravity API error: {error_message}"
+        )));
     }
 
     let user_status = response.user_status.ok_or_else(|| {
@@ -705,12 +735,12 @@ fn parse_command_model_response(text: &str) -> Result<StatusSnapshot, ProviderEr
             ))
         })?;
 
-    if let Some(ref code) = response.code {
-        if let Some(error_message) = invalid_code(code) {
-            return Err(provider_error(&format!(
-                "Antigravity API error: {error_message}"
-            )));
-        }
+    if let Some(ref code) = response.code
+        && let Some(error_message) = invalid_code(code)
+    {
+        return Err(provider_error(&format!(
+            "Antigravity API error: {error_message}"
+        )));
     }
 
     let model_configs = response.client_model_configs.unwrap_or_default();

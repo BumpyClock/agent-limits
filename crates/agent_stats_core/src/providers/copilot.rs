@@ -66,18 +66,37 @@ impl Provider for CopilotProvider {
 }
 
 fn resolve_token(config_api_key: &Option<String>) -> Result<String, ProviderErrorPayload> {
-    let token = config_api_key
+    let raw_token = config_api_key
         .clone()
         .or_else(|| std::env::var("COPILOT_API_TOKEN").ok())
         .unwrap_or_default();
 
-    if token.trim().is_empty() {
+    let token = clean_token(&raw_token);
+
+    if token.is_empty() {
         return Err(provider_error(
             "Copilot token missing. Set in config apiKey or COPILOT_API_TOKEN env var.",
         ));
     }
 
     Ok(token)
+}
+
+/// Clean token by trimming whitespace and removing surrounding quotes.
+/// Matches Swift ProviderTokenResolver.cleaned() behavior.
+fn clean_token(raw: &str) -> String {
+    let mut value = raw.trim();
+
+    // Remove surrounding quotes (single or double)
+    if (value.starts_with('"') && value.ends_with('"'))
+        || (value.starts_with('\'') && value.ends_with('\''))
+    {
+        if value.len() >= 2 {
+            value = &value[1..value.len() - 1];
+        }
+    }
+
+    value.trim().to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -107,6 +126,7 @@ struct CopilotUsageResponse {
     quota_snapshots: CopilotQuotaSnapshots,
     #[serde(default)]
     copilot_plan: String,
+    #[allow(dead_code)]
     #[serde(default)]
     quota_reset_date: String,
 }
@@ -163,19 +183,19 @@ fn make_rate_window(
 }
 
 fn build_usage_snapshot(response: &CopilotUsageResponse, now: OffsetDateTime) -> UsageSnapshot {
-    let reset_date = parse_reset_date(&response.quota_reset_date);
-
+    // Note: Swift reference does not include reset dates in individual quota snapshots.
+    // Reset date is global but not exposed per-window in the reference implementation.
     let primary = response
         .quota_snapshots
         .premium_interactions
         .as_ref()
-        .map(|snapshot| make_rate_window(snapshot, reset_date))
+        .map(|snapshot| make_rate_window(snapshot, None))
         .or_else(|| {
             Some(RateWindow {
                 used_percent: 0.0,
                 window_minutes: None,
-                resets_at: reset_date,
-                reset_description: reset_date.as_ref().map(format_reset_date),
+                resets_at: None,
+                reset_description: None,
             })
         });
 
@@ -211,7 +231,10 @@ fn build_usage_snapshot(response: &CopilotUsageResponse, now: OffsetDateTime) ->
 // ---------------------------------------------------------------------------
 // Device flow (GitHub OAuth)
 // ---------------------------------------------------------------------------
+// These types and functions are provided for future device flow authentication support.
+// They are currently unused but match the Swift reference implementation.
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct DeviceCodeResponse {
     pub device_code: String,
@@ -221,17 +244,20 @@ pub struct DeviceCodeResponse {
     pub interval: u64,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct AccessTokenResponse {
     access_token: String,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct DeviceFlowErrorResponse {
     error: Option<String>,
     error_description: Option<String>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug)]
 pub enum DeviceFlowPollResult {
     Token(String),
@@ -239,6 +265,9 @@ pub enum DeviceFlowPollResult {
     SlowDown,
 }
 
+/// Request a device code for GitHub OAuth device flow.
+/// This function is provided for future use and matches the Swift reference implementation.
+#[allow(dead_code)]
 pub fn request_device_code() -> Result<DeviceCodeResponse, ProviderErrorPayload> {
     let body = format!("client_id={VSCODE_CLIENT_ID}&scope=read:user");
 
@@ -264,13 +293,14 @@ pub fn request_device_code() -> Result<DeviceCodeResponse, ProviderErrorPayload>
         }
     };
 
-    response.into_json().map_err(|error| {
-        provider_error(&format!(
-            "Failed to parse device code response: {error}"
-        ))
-    })
+    response
+        .into_json()
+        .map_err(|error| provider_error(&format!("Failed to parse device code response: {error}")))
 }
 
+/// Poll for an access token using a device code.
+/// This function is provided for future use and matches the Swift reference implementation.
+#[allow(dead_code)]
 pub fn poll_for_token(device_code: &str) -> Result<DeviceFlowPollResult, ProviderErrorPayload> {
     let body = format!(
         "client_id={VSCODE_CLIENT_ID}&device_code={device_code}&grant_type=urn:ietf:params:oauth:grant-type:device_code"
@@ -328,9 +358,7 @@ pub fn poll_for_token(device_code: &str) -> Result<DeviceFlowPollResult, Provide
 
     let token_response: AccessTokenResponse =
         serde_json::from_str(&body_string).map_err(|error| {
-            provider_error(&format!(
-                "Failed to parse access token response: {error}"
-            ))
+            provider_error(&format!("Failed to parse access token response: {error}"))
         })?;
 
     Ok(DeviceFlowPollResult::Token(token_response.access_token))
@@ -352,6 +380,7 @@ fn capitalize_first(value: &str) -> String {
     }
 }
 
+#[cfg(test)]
 fn parse_reset_date(value: &str) -> Option<OffsetDateTime> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -495,7 +524,8 @@ mod tests {
 
         let primary = snapshot.primary.as_ref().expect("primary should exist");
         assert!((primary.used_percent - 20.0).abs() < f64::EPSILON);
-        assert!(primary.resets_at.is_some());
+        // Reset dates are not included per Swift reference
+        assert!(primary.resets_at.is_none());
 
         let secondary = snapshot.secondary.as_ref().expect("secondary should exist");
         assert!((secondary.used_percent - 50.0).abs() < f64::EPSILON);
@@ -518,7 +548,10 @@ mod tests {
         let now = OffsetDateTime::now_utc();
         let snapshot = build_usage_snapshot(&response, now);
 
-        let primary = snapshot.primary.as_ref().expect("fallback primary should exist");
+        let primary = snapshot
+            .primary
+            .as_ref()
+            .expect("fallback primary should exist");
         assert!((primary.used_percent - 0.0).abs() < f64::EPSILON);
         assert!(snapshot.secondary.is_none());
         assert_eq!(
@@ -560,8 +593,48 @@ mod tests {
     }
 
     #[test]
+    fn test_clean_token_no_quotes() {
+        assert_eq!(clean_token("test-token-123"), "test-token-123");
+        assert_eq!(clean_token("  test-token-123  "), "test-token-123");
+    }
+
+    #[test]
+    fn test_clean_token_double_quotes() {
+        assert_eq!(clean_token("\"test-token-123\""), "test-token-123");
+        assert_eq!(clean_token("  \"test-token-123\"  "), "test-token-123");
+    }
+
+    #[test]
+    fn test_clean_token_single_quotes() {
+        assert_eq!(clean_token("'test-token-123'"), "test-token-123");
+        assert_eq!(clean_token("  'test-token-123'  "), "test-token-123");
+    }
+
+    #[test]
+    fn test_clean_token_mismatched_quotes() {
+        assert_eq!(clean_token("\"test-token-123'"), "\"test-token-123'");
+        assert_eq!(clean_token("'test-token-123\""), "'test-token-123\"");
+    }
+
+    #[test]
+    fn test_clean_token_empty() {
+        assert_eq!(clean_token(""), "");
+        assert_eq!(clean_token("   "), "");
+        assert_eq!(clean_token("\"\""), "");
+        assert_eq!(clean_token("''"), "");
+    }
+
+    #[test]
     fn test_resolve_token_from_config() {
         let api_key = Some("test-token-123".to_string());
+        let result = resolve_token(&api_key);
+        assert!(result.is_ok());
+        assert_eq!(result.expect("should resolve"), "test-token-123");
+    }
+
+    #[test]
+    fn test_resolve_token_with_quotes() {
+        let api_key = Some("\"test-token-123\"".to_string());
         let result = resolve_token(&api_key);
         assert!(result.is_ok());
         assert_eq!(result.expect("should resolve"), "test-token-123");

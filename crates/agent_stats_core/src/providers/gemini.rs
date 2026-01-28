@@ -13,12 +13,10 @@ use std::fs;
 use std::path::Path;
 use time::OffsetDateTime;
 
-const QUOTA_ENDPOINT: &str =
-    "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota";
+const QUOTA_ENDPOINT: &str = "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota";
 const LOAD_CODE_ASSIST_ENDPOINT: &str =
     "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist";
-const PROJECTS_ENDPOINT: &str =
-    "https://cloudresourcemanager.googleapis.com/v1/projects";
+const PROJECTS_ENDPOINT: &str = "https://cloudresourcemanager.googleapis.com/v1/projects";
 const TOKEN_REFRESH_ENDPOINT: &str = "https://oauth2.googleapis.com/token";
 const CREDENTIALS_PATH: &str = ".gemini/oauth_creds.json";
 const SETTINGS_PATH: &str = ".gemini/settings.json";
@@ -50,9 +48,8 @@ impl Provider for GeminiProvider {
             }
         }
 
-        let home = dirs::home_dir().ok_or_else(|| {
-            provider_error("Could not resolve home directory.")
-        })?;
+        let home =
+            dirs::home_dir().ok_or_else(|| provider_error("Could not resolve home directory."))?;
 
         let auth_type = read_auth_type(&home);
         match auth_type {
@@ -84,8 +81,7 @@ impl Provider for GeminiProvider {
 
         let claims = extract_claims_from_id_token(credentials.id_token.as_deref());
 
-        let code_assist_status =
-            load_code_assist_status(&access_token).unwrap_or_default();
+        let code_assist_status = load_code_assist_status(&access_token).unwrap_or_default();
 
         let project_id = code_assist_status
             .project_id
@@ -98,9 +94,17 @@ impl Provider for GeminiProvider {
             return Err(provider_error("No quota data returned from Gemini API."));
         }
 
-        let plan = determine_plan(&code_assist_status.tier, &claims.hosted_domain);
+        let plan = determine_plan(
+            code_assist_status.tier.as_ref(),
+            claims.hosted_domain.as_deref(),
+        );
 
-        let usage = build_usage_snapshot(&model_quotas, claims.email.as_deref(), plan.as_deref(), context.now);
+        let usage = build_usage_snapshot(
+            &model_quotas,
+            claims.email.as_deref(),
+            plan.as_deref(),
+            context.now,
+        );
 
         Ok(ProviderPayload {
             provider: ProviderId::Gemini.to_string(),
@@ -171,13 +175,11 @@ fn load_credentials(home: &Path) -> Result<OAuthCredentials, ProviderErrorPayloa
         ));
     }
 
-    let content = fs::read_to_string(&creds_path).map_err(|error| {
-        provider_error(&format!("Failed to read Gemini credentials: {error}"))
-    })?;
+    let content = fs::read_to_string(&creds_path)
+        .map_err(|error| provider_error(&format!("Failed to read Gemini credentials: {error}")))?;
 
-    let json: Value = serde_json::from_str(&content).map_err(|error| {
-        provider_error(&format!("Invalid Gemini credentials file: {error}"))
-    })?;
+    let json: Value = serde_json::from_str(&content)
+        .map_err(|error| provider_error(&format!("Invalid Gemini credentials file: {error}")))?;
 
     Ok(OAuthCredentials {
         access_token: json
@@ -192,9 +194,7 @@ fn load_credentials(home: &Path) -> Result<OAuthCredentials, ProviderErrorPayloa
             .get("refresh_token")
             .and_then(|value| value.as_str())
             .map(String::from),
-        expiry_date_ms: json
-            .get("expiry_date")
-            .and_then(|value| value.as_f64()),
+        expiry_date_ms: json.get("expiry_date").and_then(|value| value.as_f64()),
     })
 }
 
@@ -266,9 +266,7 @@ fn maybe_refresh_token(
     let new_access_token = json
         .get("access_token")
         .and_then(|value| value.as_str())
-        .ok_or_else(|| {
-            provider_error("Gemini token refresh response missing access_token.")
-        })?
+        .ok_or_else(|| provider_error("Gemini token refresh response missing access_token."))?
         .to_string();
 
     update_stored_credentials(&json, home).log_err_quietly();
@@ -295,16 +293,10 @@ fn extract_oauth_client_credentials() -> Option<OAuthClientCredentials> {
     let oauth_file = "dist/src/code_assist/oauth2.js";
 
     let possible_paths = [
-        base_dir
-            .join("libexec")
-            .join("lib")
-            .join(oauth_subpath),
+        base_dir.join("libexec").join("lib").join(oauth_subpath),
         base_dir.join("lib").join(oauth_subpath),
         base_dir.join(nix_share_subpath),
-        base_dir
-            .join("..")
-            .join("gemini-cli-core")
-            .join(oauth_file),
+        base_dir.join("..").join("gemini-cli-core").join(oauth_file),
         base_dir
             .join("node_modules")
             .join("@google")
@@ -333,9 +325,8 @@ fn parse_oauth_credentials_from_source(content: &str) -> Option<OAuthClientCrede
 }
 
 fn extract_js_string_constant(content: &str, name: &str) -> Option<String> {
-    let needle = format!("{name}");
-    let pos = content.find(&needle)?;
-    let after_name = &content[pos + needle.len()..];
+    let pos = content.find(name)?;
+    let after_name = &content[pos + name.len()..];
 
     let equals_pos = after_name.find('=')?;
     let after_equals = after_name[equals_pos + 1..].trim_start();
@@ -358,10 +349,7 @@ fn extract_js_string_constant(content: &str, name: &str) -> Option<String> {
     Some(value.to_string())
 }
 
-fn update_stored_credentials(
-    refresh_response: &Value,
-    home: &Path,
-) -> Result<(), String> {
+fn update_stored_credentials(refresh_response: &Value, home: &Path) -> Result<(), String> {
     let creds_path = home.join(CREDENTIALS_PATH);
     let existing_content = fs::read_to_string(&creds_path)
         .map_err(|error| format!("Failed to read credentials for update: {error}"))?;
@@ -454,9 +442,6 @@ fn base64_url_decode(input: &str) -> Option<Vec<u8>> {
 }
 
 fn base64_decode_standard(input: &str) -> Option<Vec<u8>> {
-    const TABLE: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
     fn decode_char(c: u8) -> Option<u8> {
         match c {
             b'A'..=b'Z' => Some(c - b'A'),
@@ -464,12 +449,9 @@ fn base64_decode_standard(input: &str) -> Option<Vec<u8>> {
             b'0'..=b'9' => Some(c - b'0' + 52),
             b'+' => Some(62),
             b'/' => Some(63),
-            b'=' => None,
             _ => None,
         }
     }
-
-    let _ = TABLE; // suppress unused warning in a way the compiler accepts
 
     let bytes = input.as_bytes();
     let mut output = Vec::with_capacity(bytes.len() * 3 / 4);
@@ -515,9 +497,7 @@ enum GeminiTier {
     Legacy,
 }
 
-fn load_code_assist_status(
-    access_token: &str,
-) -> Result<CodeAssistStatus, ProviderErrorPayload> {
+fn load_code_assist_status(access_token: &str) -> Result<CodeAssistStatus, ProviderErrorPayload> {
     let body = r#"{"metadata":{"ideType":"GEMINI_CLI","pluginType":"GEMINI"}}"#;
 
     let response = ureq::post(LOAD_CODE_ASSIST_ENDPOINT)
@@ -577,9 +557,7 @@ fn extract_project_id_from_code_assist(json: &Value) -> Option<String> {
 
 // --- Project discovery fallback ---
 
-fn discover_gemini_project_id(
-    access_token: &str,
-) -> Result<Option<String>, ProviderErrorPayload> {
+fn discover_gemini_project_id(access_token: &str) -> Result<Option<String>, ProviderErrorPayload> {
     let response = ureq::get(PROJECTS_ENDPOINT)
         .timeout(std::time::Duration::from_millis(REQUEST_TIMEOUT_MS))
         .set("Authorization", &format!("Bearer {access_token}"))
@@ -682,9 +660,7 @@ fn fetch_quota(
     };
 
     let quota_response: QuotaResponse = response.into_json().map_err(|error| {
-        provider_error(&format!(
-            "Failed to parse Gemini quota response: {error}"
-        ))
+        provider_error(&format!("Failed to parse Gemini quota response: {error}"))
     })?;
 
     let buckets = match quota_response.buckets {
@@ -723,12 +699,8 @@ fn fetch_quota(
     let mut quotas: Vec<ModelQuota> = model_map
         .into_iter()
         .map(|(model_id, (fraction, reset_time_str))| {
-            let reset_time = reset_time_str
-                .as_deref()
-                .and_then(parse_iso8601_datetime);
-            let reset_description = reset_time_str
-                .as_deref()
-                .map(|time_str| format_reset_time(time_str));
+            let reset_time = reset_time_str.as_deref().and_then(parse_iso8601_datetime);
+            let reset_description = reset_time_str.as_deref().map(format_reset_time);
             ModelQuota {
                 model_id,
                 percent_left: fraction * 100.0,
@@ -754,18 +726,35 @@ fn build_usage_snapshot(
     let pro_min = model_quotas
         .iter()
         .filter(|quota| quota.model_id.to_lowercase().contains("pro"))
-        .min_by(|a, b| a.percent_left.partial_cmp(&b.percent_left).unwrap_or(std::cmp::Ordering::Equal));
+        .min_by(|a, b| {
+            a.percent_left
+                .partial_cmp(&b.percent_left)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
     let flash_min = model_quotas
         .iter()
         .filter(|quota| quota.model_id.to_lowercase().contains("flash"))
-        .min_by(|a, b| a.percent_left.partial_cmp(&b.percent_left).unwrap_or(std::cmp::Ordering::Equal));
+        .min_by(|a, b| {
+            a.percent_left
+                .partial_cmp(&b.percent_left)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
-    let primary = pro_min.map(|quota| RateWindow {
-        used_percent: 100.0 - quota.percent_left,
-        window_minutes: Some(1440),
-        resets_at: quota.reset_time,
-        reset_description: quota.reset_description.clone(),
+    // Swift reference always creates a primary window (defaults to 0% used if no pro model)
+    let primary = Some(match pro_min {
+        Some(quota) => RateWindow {
+            used_percent: 100.0 - quota.percent_left,
+            window_minutes: Some(1440),
+            resets_at: quota.reset_time,
+            reset_description: quota.reset_description.clone(),
+        },
+        None => RateWindow {
+            used_percent: 0.0,
+            window_minutes: Some(1440),
+            resets_at: None,
+            reset_description: None,
+        },
     });
 
     let secondary = flash_min.map(|quota| RateWindow {
@@ -794,10 +783,7 @@ fn build_usage_snapshot(
 
 // --- Plan detection ---
 
-fn determine_plan(
-    tier: &Option<GeminiTier>,
-    hosted_domain: &Option<String>,
-) -> Option<String> {
+fn determine_plan(tier: Option<&GeminiTier>, hosted_domain: Option<&str>) -> Option<String> {
     match tier {
         Some(GeminiTier::Standard) => Some("Paid".to_string()),
         Some(GeminiTier::Free) => {
@@ -963,7 +949,10 @@ mod tests {
         // "test" with explicit padding stripped
         let decoded = base64_url_decode("dGVzdA");
         assert!(decoded.is_some());
-        assert_eq!(String::from_utf8(decoded.expect("decoded")).ok(), Some("test".to_string()));
+        assert_eq!(
+            String::from_utf8(decoded.expect("decoded")).ok(),
+            Some("test".to_string())
+        );
     }
 
     // --- Project ID extraction from Code Assist ---
@@ -1028,7 +1017,7 @@ mod tests {
     #[test]
     fn test_determine_plan_standard() {
         assert_eq!(
-            determine_plan(&Some(GeminiTier::Standard), &None),
+            determine_plan(Some(&GeminiTier::Standard), None),
             Some("Paid".to_string())
         );
     }
@@ -1036,7 +1025,7 @@ mod tests {
     #[test]
     fn test_determine_plan_free_with_domain() {
         assert_eq!(
-            determine_plan(&Some(GeminiTier::Free), &Some("corp.com".to_string())),
+            determine_plan(Some(&GeminiTier::Free), Some("corp.com")),
             Some("Workspace".to_string())
         );
     }
@@ -1044,7 +1033,7 @@ mod tests {
     #[test]
     fn test_determine_plan_free_personal() {
         assert_eq!(
-            determine_plan(&Some(GeminiTier::Free), &None),
+            determine_plan(Some(&GeminiTier::Free), None),
             Some("Free".to_string())
         );
     }
@@ -1052,20 +1041,20 @@ mod tests {
     #[test]
     fn test_determine_plan_legacy() {
         assert_eq!(
-            determine_plan(&Some(GeminiTier::Legacy), &None),
+            determine_plan(Some(&GeminiTier::Legacy), None),
             Some("Legacy".to_string())
         );
     }
 
     #[test]
     fn test_determine_plan_none() {
-        assert_eq!(determine_plan(&None, &None), None);
+        assert_eq!(determine_plan(None, None), None);
     }
 
     #[test]
     fn test_determine_plan_standard_with_domain() {
         assert_eq!(
-            determine_plan(&Some(GeminiTier::Standard), &Some("corp.com".to_string())),
+            determine_plan(Some(&GeminiTier::Standard), Some("corp.com")),
             Some("Paid".to_string())
         );
     }
@@ -1102,8 +1091,10 @@ mod tests {
 
     #[test]
     fn test_format_reset_time_future() {
-        let future = OffsetDateTime::now_utc() + time::Duration::hours(3) + time::Duration::minutes(15);
-        let iso = future.format(&time::format_description::well_known::Rfc3339)
+        let future =
+            OffsetDateTime::now_utc() + time::Duration::hours(3) + time::Duration::minutes(15);
+        let iso = future
+            .format(&time::format_description::well_known::Rfc3339)
             .expect("format");
         let result = format_reset_time(&iso);
         assert!(result.starts_with("Resets in 3h"));
@@ -1112,7 +1103,8 @@ mod tests {
     #[test]
     fn test_format_reset_time_past() {
         let past = OffsetDateTime::now_utc() - time::Duration::hours(1);
-        let iso = past.format(&time::format_description::well_known::Rfc3339)
+        let iso = past
+            .format(&time::format_description::well_known::Rfc3339)
             .expect("format");
         assert_eq!(format_reset_time(&iso), "Resets soon");
     }
@@ -1120,7 +1112,8 @@ mod tests {
     #[test]
     fn test_format_reset_time_minutes_only() {
         let future = OffsetDateTime::now_utc() + time::Duration::minutes(45);
-        let iso = future.format(&time::format_description::well_known::Rfc3339)
+        let iso = future
+            .format(&time::format_description::well_known::Rfc3339)
             .expect("format");
         let result = format_reset_time(&iso);
         assert!(result.starts_with("Resets in "));
@@ -1317,14 +1310,12 @@ mod tests {
     #[test]
     fn test_build_usage_snapshot_pro_only() {
         let now = OffsetDateTime::now_utc();
-        let quotas = vec![
-            ModelQuota {
-                model_id: "gemini-2.5-pro".to_string(),
-                percent_left: 75.0,
-                reset_time: None,
-                reset_description: None,
-            },
-        ];
+        let quotas = vec![ModelQuota {
+            model_id: "gemini-2.5-pro".to_string(),
+            percent_left: 75.0,
+            reset_time: None,
+            reset_description: None,
+        }];
 
         let snapshot = build_usage_snapshot(&quotas, None, None, now);
 
@@ -1338,18 +1329,18 @@ mod tests {
     #[test]
     fn test_build_usage_snapshot_flash_only() {
         let now = OffsetDateTime::now_utc();
-        let quotas = vec![
-            ModelQuota {
-                model_id: "gemini-2.5-flash".to_string(),
-                percent_left: 50.0,
-                reset_time: None,
-                reset_description: None,
-            },
-        ];
+        let quotas = vec![ModelQuota {
+            model_id: "gemini-2.5-flash".to_string(),
+            percent_left: 50.0,
+            reset_time: None,
+            reset_description: None,
+        }];
 
         let snapshot = build_usage_snapshot(&quotas, None, None, now);
 
-        assert!(snapshot.primary.is_none());
+        // Primary always exists (Swift parity), defaults to 0% used when no pro model
+        let primary = snapshot.primary.as_ref().expect("primary");
+        assert!(primary.used_percent.abs() < 0.01);
         assert!(snapshot.secondary.is_some());
 
         let secondary = snapshot.secondary.as_ref().expect("secondary");
@@ -1359,17 +1350,17 @@ mod tests {
     #[test]
     fn test_build_usage_snapshot_no_matching_models() {
         let now = OffsetDateTime::now_utc();
-        let quotas = vec![
-            ModelQuota {
-                model_id: "gemini-unknown-model".to_string(),
-                percent_left: 80.0,
-                reset_time: None,
-                reset_description: None,
-            },
-        ];
+        let quotas = vec![ModelQuota {
+            model_id: "gemini-unknown-model".to_string(),
+            percent_left: 80.0,
+            reset_time: None,
+            reset_description: None,
+        }];
 
         let snapshot = build_usage_snapshot(&quotas, None, None, now);
-        assert!(snapshot.primary.is_none());
+        // Primary always exists (Swift parity), defaults to 0% used
+        let primary = snapshot.primary.as_ref().expect("primary");
+        assert!(primary.used_percent.abs() < 0.01);
         assert!(snapshot.secondary.is_none());
     }
 
@@ -1401,30 +1392,46 @@ mod tests {
         let now = OffsetDateTime::now_utc();
 
         // 0% left = 100% used
-        let quotas = vec![
-            ModelQuota {
-                model_id: "gemini-2.5-pro".to_string(),
-                percent_left: 0.0,
-                reset_time: None,
-                reset_description: None,
-            },
-        ];
+        let quotas = vec![ModelQuota {
+            model_id: "gemini-2.5-pro".to_string(),
+            percent_left: 0.0,
+            reset_time: None,
+            reset_description: None,
+        }];
         let snapshot = build_usage_snapshot(&quotas, None, None, now);
         let primary = snapshot.primary.as_ref().expect("primary");
         assert!((primary.used_percent - 100.0).abs() < 0.01);
 
         // 100% left = 0% used
-        let quotas = vec![
-            ModelQuota {
-                model_id: "gemini-2.5-pro".to_string(),
-                percent_left: 100.0,
-                reset_time: None,
-                reset_description: None,
-            },
-        ];
+        let quotas = vec![ModelQuota {
+            model_id: "gemini-2.5-pro".to_string(),
+            percent_left: 100.0,
+            reset_time: None,
+            reset_description: None,
+        }];
         let snapshot = build_usage_snapshot(&quotas, None, None, now);
         let primary = snapshot.primary.as_ref().expect("primary");
         assert!(primary.used_percent.abs() < 0.01);
+    }
+
+    #[test]
+    fn test_build_usage_snapshot_empty_quotas_still_has_primary() {
+        let now = OffsetDateTime::now_utc();
+        let quotas: Vec<ModelQuota> = vec![];
+
+        let snapshot = build_usage_snapshot(&quotas, Some("user@test.com"), Some("Free"), now);
+
+        let primary = snapshot.primary.as_ref().expect("primary always present");
+        assert!(primary.used_percent.abs() < 0.01);
+        assert_eq!(primary.window_minutes, Some(1440));
+        assert!(primary.resets_at.is_none());
+        assert!(primary.reset_description.is_none());
+        assert!(snapshot.secondary.is_none());
+        assert!(snapshot.tertiary.is_none());
+
+        let identity = snapshot.identity.as_ref().expect("identity");
+        assert_eq!(identity.account_email.as_deref(), Some("user@test.com"));
+        assert_eq!(identity.login_method.as_deref(), Some("Free"));
     }
 
     // --- Provider error helper ---
@@ -1441,7 +1448,11 @@ mod tests {
 
     fn base64_url_encode(input: &str) -> String {
         let encoded = base64_encode_standard(input.as_bytes());
-        encoded.replace('+', "-").replace('/', "_").trim_end_matches('=').to_string()
+        encoded
+            .replace('+', "-")
+            .replace('/', "_")
+            .trim_end_matches('=')
+            .to_string()
     }
 
     fn base64_encode_standard(input: &[u8]) -> String {
