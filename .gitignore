@@ -1,0 +1,5 @@
+references/
+.ai_agents/session_context/
+.claude/
+.codex/
+target/
