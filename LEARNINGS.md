@@ -100,3 +100,7 @@
   What I tried: Added gpui-component Skeleton rows for the usage section when refreshing without a snapshot.
   Outcome: Provider cards now show loading placeholders while data fetches.
   Next time: Keep skeletons scoped to the usage section so headers remain readable.
+- Context: Main window needed a radical, glanceable redesign.
+  What I tried: Rebuilt the header, added a glance strip, standardized card layout/typography, and added minimal fade animations for updates.
+  Outcome: The main window now presents summaries first with consistent card hierarchy and motion polish.
+  Next time: Keep glance strip derived from existing snapshots and hide it when no snapshots exist.

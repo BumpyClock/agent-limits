@@ -4,15 +4,17 @@ use agent_stats_core::config::{
     TokenAccountEntry,
 };
 use agent_stats_core::models::{
-    ProviderIdentitySnapshot, ProviderPayload, ProviderStatusIndicator, RateWindow, UsageSnapshot,
+    ProviderErrorPayload, ProviderIdentitySnapshot, ProviderPayload, ProviderStatusIndicator,
+    RateWindow, UsageSnapshot,
 };
 use agent_stats_core::provider_metadata::{ProviderId, ProviderMetadata, provider_metadata};
 use agent_stats_core::token_accounts::{TokenAccountSupport, token_account_support};
 use agent_stats_core::{DeviceFlowPollResult, request_device_code, poll_for_token};
 use gpui::{
-    App, Application, AsyncApp, ClipboardItem, Context, Entity, Render, Task, WeakEntity, Window,
-    WindowBounds, WindowOptions, div, px, size, prelude::*,
+    Animation, AnimationExt, App, Application, AsyncApp, ClipboardItem, Context, Entity, Hsla,
+    Render, Task, WeakEntity, Window, WindowBounds, WindowOptions, div, px, size, prelude::*,
 };
+use gpui_component::animation::cubic_bezier;
 use gpui_component::button::Button;
 use gpui_component::checkbox::Checkbox;
 use gpui_component::input::{Input, InputState};
@@ -20,9 +22,10 @@ use gpui_component::label::Label;
 use gpui_component::progress::Progress;
 use gpui_component::skeleton::Skeleton;
 use gpui_component::scroll::ScrollableElement as _;
-use gpui_component::{Disableable, Selectable, StyledExt};
+use gpui_component::{ActiveTheme, Disableable, Selectable, StyledExt};
 use gpui_component::Root;
 use std::collections::HashMap;
+use std::time::Duration as StdDuration;
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
@@ -736,33 +739,40 @@ impl Render for AgentStatsApp {
         let content: gpui::AnyElement = if self.show_settings {
             render_settings(self, cx)
         } else {
+            let now = OffsetDateTime::now_utc();
             let header = div()
                 .flex()
-                .items_center()
-                .justify_between()
-                .child(Label::new("Agent Stats").text_lg())
+                .flex_col()
+                .gap(px(6.0))
                 .child(
                     div()
                         .flex()
                         .items_center()
-                        .gap(px(8.0))
-                        .child(render_last_refresh(self.last_refresh))
+                        .justify_between()
+                        .child(Label::new("Agent Limits").text_lg().font_semibold())
                         .child(
-                            Button::new("refresh")
-                                .label("Refresh")
-                                .disabled(self.refreshing)
-                                .on_click(cx.listener(|app, _event, _window, cx| {
-                                    app.refresh_now(cx);
-                                })),
-                        )
-                        .child(
-                            Button::new("settings")
-                                .label("Settings")
-                                .on_click(cx.listener(|app, _event, _window, cx| {
-                                    app.toggle_settings(cx);
-                                })),
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(8.0))
+                                .child(
+                                    Button::new("refresh")
+                                        .label("Refresh")
+                                        .disabled(self.refreshing)
+                                        .on_click(cx.listener(|app, _event, _window, cx| {
+                                            app.refresh_now(cx);
+                                        })),
+                                )
+                                .child(
+                                    Button::new("settings")
+                                        .label("Settings")
+                                        .on_click(cx.listener(|app, _event, _window, cx| {
+                                            app.toggle_settings(cx);
+                                        })),
+                                ),
                         ),
-                );
+                )
+                .child(render_last_refresh(self.last_refresh, self.refreshing, now, cx));
 
             let error_banner = self
                 .error
@@ -770,31 +780,37 @@ impl Render for AgentStatsApp {
                 .map(|message| {
                     div()
                         .rounded_md()
-                        .bg(gpui::rgba(0xFF5A5A26))
-                        .paddings(px(8.0))
-                        .child(Label::new(format!("Refresh failed: {message}")))
+                        .border_1()
+                        .bg(cx.theme().danger.opacity(0.12))
+                        .paddings(px(10.0))
+                        .child(
+                            Label::new(format!("Refresh failed: {message}"))
+                                .text_sm()
+                                .text_color(cx.theme().danger_foreground),
+                        )
                 });
+
+            let glance_strip = build_glance_summary(&self.providers, now)
+                .map(|summary| render_glance_strip(&summary, now, cx));
 
             let provider_list = div()
                 .flex()
                 .flex_col()
-                .gap(px(12.0))
+                .gap(px(16.0))
                 .children(self.providers.iter().filter(|provider| {
-                    provider
-                        .config
-                        .enabled
-                        .unwrap_or(provider.metadata.default_enabled)
-                }).map(|provider| render_provider_card(provider, &self.settings, self.refreshing)));
+                    provider_is_enabled(provider)
+                }).map(|provider| render_provider_card(provider, &self.settings, self.refreshing, now, cx)));
 
             div()
                 .size_full()
                 .flex()
                 .flex_col()
-                .gap(px(12.0))
+                .gap(px(16.0))
                 .paddings(px(16.0))
                 .overflow_y_scrollbar()
                 .child(header)
                 .when_some(error_banner, |this, banner| this.child(banner))
+                .when_some(glance_strip, |this, strip| this.child(strip))
                 .child(provider_list)
                 .into_any_element()
         };
@@ -1353,6 +1369,8 @@ fn render_provider_card(
     provider: &ProviderState,
     settings: &AppSettings,
     refreshing: bool,
+    now: OffsetDateTime,
+    cx: &App,
 ) -> gpui::AnyElement {
     let payload = provider.payload.as_ref();
     let usage = payload.and_then(|payload| payload.usage.as_ref());
@@ -1365,118 +1383,151 @@ fn render_provider_card(
             .and_then(|payload| payload.credits.as_ref())
             .is_some();
     let is_loading = refreshing && !has_snapshot && error.is_none();
-    let stale_badge = error.map(|_| {
-        let label = if has_snapshot {
-            "Stale"
-        } else {
-            "Last refresh failed"
-        };
-        div()
-            .rounded_sm()
-            .bg(gpui::rgba(0xFF5A5A26))
-            .paddings(px(4.0))
-            .child(Label::new(label).text_sm())
+    let account_text = provider_account_text(payload, usage);
+    let account_label = account_text.clone().map(|label| {
+        Label::new(label)
+            .text_sm()
+            .text_color(cx.theme().muted_foreground)
+            .truncate()
+            .into_any_element()
     });
+    let identity_line = usage
+        .and_then(|snapshot| snapshot.identity.as_ref())
+        .and_then(|identity| render_identity_line(identity, account_text.as_deref(), cx));
+    let updated_text = provider_updated_text(usage, error, is_loading, now);
+    let status_badge = error.map(|_| {
+        let label = if has_snapshot { "Stale" } else { "Failed" };
+        status_badge(label, cx)
+    });
+    let status_cluster = div()
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .when_some(
+            status_indicator.map(|indicator| render_status_indicator(Some(indicator), cx)),
+            |this, indicator| this.child(indicator),
+        )
+        .when_some(status_badge, |this, badge| this.child(badge));
 
     let header = div()
         .flex()
         .items_center()
         .justify_between()
-        .child(Label::new(provider.metadata.display_name).text_lg())
+        .child(Label::new(provider.metadata.display_name).text_lg().font_semibold())
+        .when_some(account_label, |this, label| this.child(label));
+
+    let subheader = div()
+        .flex()
+        .items_center()
+        .justify_between()
         .child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(8.0))
-                .child(render_status_indicator(status_indicator))
-                .when_some(stale_badge, |this, badge| this.child(badge)),
-        );
+            Label::new(updated_text)
+                .text_sm()
+                .text_color(cx.theme().muted_foreground),
+        )
+        .child(status_cluster);
 
     let usage_section = if is_loading {
         render_usage_loading(provider.metadata.id)
     } else {
-        usage
-            .map(|snapshot| render_usage(snapshot, provider.metadata.id, settings))
+        let content = usage
+            .map(|snapshot| render_usage(snapshot, provider.metadata.id, settings, cx))
             .unwrap_or_else(|| {
-                div().child(Label::new("No usage data")).into_any_element()
-            })
+                div()
+                    .child(
+                        Label::new("No usage data")
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground),
+                    )
+                    .into_any_element()
+            });
+        div()
+            .child(content)
+            .with_animation(
+                format!("usage-fade-{}", provider.metadata.id),
+                Animation::new(StdDuration::from_millis(150))
+                    .with_easing(cubic_bezier(0.25, 1.0, 0.5, 1.0)),
+                |this, delta| this.opacity(delta),
+            )
+            .into_any_element()
     };
-
-    let identity_section = usage
-        .and_then(|snapshot| snapshot.identity.as_ref())
-        .and_then(render_identity_section);
 
     let credits = payload
         .and_then(|payload| payload.credits.as_ref())
-        .map(|credits| {
-            div().child(Label::new(format!("Credits remaining: {:.2}", credits.remaining)))
-        });
+        .map(|credits| render_credits_row(credits.remaining, cx));
 
-    let error_row = error.map(|error| {
-        div()
-            .rounded_md()
-            .bg(gpui::rgba(0xFF5A5A1F))
-            .paddings(px(8.0))
-            .child(Label::new(&error.message))
-    });
+    let error_row = error.map(|error| render_error_row(&error.message, cx));
 
     div()
         .rounded_lg()
         .border_1()
-        .paddings(px(12.0))
+        .bg(cx.theme().secondary.opacity(0.35))
+        .paddings(px(16.0))
         .flex()
         .flex_col()
-        .gap(px(8.0))
+        .gap(px(12.0))
         .child(header)
-        .when_some(identity_section, |this, section| this.child(section))
+        .child(subheader)
+        .when_some(identity_line, |this, line| this.child(line))
         .child(usage_section)
-        .when_some(credits, |this, credits| this.child(credits))
-        .when_some(error_row, |this, error| this.child(error))
+        .when_some(credits, |this, credits| this.child(section_divider(cx)).child(credits))
+        .when_some(error_row, |this, error| this.child(section_divider(cx)).child(error))
         .into_any_element()
 }
 
-fn render_identity_section(identity: &ProviderIdentitySnapshot) -> Option<gpui::AnyElement> {
-    let mut lines: Vec<gpui::AnyElement> = Vec::new();
+fn provider_account_text(
+    payload: Option<&ProviderPayload>,
+    usage: Option<&UsageSnapshot>,
+) -> Option<String> {
+    let identity = usage.and_then(|snapshot| snapshot.identity.as_ref());
+    let email = identity
+        .and_then(|identity| identity.account_email.as_ref())
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty());
+    let account = payload
+        .and_then(|payload| payload.account.as_ref())
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty());
+    let organization = identity
+        .and_then(|identity| identity.account_organization.as_ref())
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty());
 
-    if let Some(email) = identity.account_email.as_ref() {
-        let email = email.trim();
-        if !email.is_empty() {
-            lines.push(Label::new(format!("Account: {email}")).text_sm().into_any_element());
-        }
-    }
+    email
+        .or(account)
+        .or(organization)
+        .map(|value| value.to_string())
+}
+
+fn render_identity_line(
+    identity: &ProviderIdentitySnapshot,
+    account_label: Option<&str>,
+    cx: &App,
+) -> Option<gpui::AnyElement> {
+    let mut parts = Vec::new();
 
     if let Some(organization) = identity.account_organization.as_ref() {
         let organization = organization.trim();
-        if !organization.is_empty() {
-            lines.push(
-                Label::new(format!("Organization: {organization}"))
-                    .text_sm()
-                    .into_any_element(),
-            );
+        if !organization.is_empty() && Some(organization) != account_label {
+            parts.push(format!("Org: {organization}"));
         }
     }
 
     if let Some(method) = identity.login_method.as_ref() {
         let method = method.trim();
         if !method.is_empty() {
-            lines.push(
-                Label::new(format!("Login: {method}"))
-                    .text_sm()
-                    .into_any_element(),
-            );
+            parts.push(format!("Login: {method}"));
         }
     }
 
-    if lines.is_empty() {
+    if parts.is_empty() {
         return None;
     }
 
     Some(
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(4.0))
-            .children(lines)
+        Label::new(parts.join(" | "))
+            .text_sm()
+            .text_color(cx.theme().muted_foreground)
             .into_any_element(),
     )
 }
@@ -1485,25 +1536,27 @@ fn render_usage(
     snapshot: &UsageSnapshot,
     provider_id: ProviderId,
     settings: &AppSettings,
+    cx: &App,
 ) -> gpui::AnyElement {
+    let accent = provider_accent_color(provider_id, cx);
     let primary = snapshot.primary.as_ref().map(|window| {
-        render_rate_window("Session", window, settings)
+        render_rate_window("Session", window, settings, accent, cx)
     });
     let secondary = snapshot.secondary.as_ref().map(|window| {
-        render_rate_window("Weekly", window, settings)
+        render_rate_window("Weekly", window, settings, accent, cx)
     });
     let tertiary = snapshot.tertiary.as_ref().map(|window| {
         let label = match provider_id {
             ProviderId::Claude => "Sonnet",
             _ => "Tertiary",
         };
-        render_rate_window(label, window, settings)
+        render_rate_window(label, window, settings, accent, cx)
     });
 
     div()
         .flex()
         .flex_col()
-        .gap(px(8.0))
+        .gap(px(12.0))
         .when_some(primary, |this, window| this.child(window))
         .when_some(secondary, |this, window| this.child(window))
         .when_some(tertiary, |this, window| this.child(window))
@@ -1520,7 +1573,7 @@ fn render_usage_loading(provider_id: ProviderId) -> gpui::AnyElement {
     div()
         .flex()
         .flex_col()
-        .gap(px(10.0))
+        .gap(px(12.0))
         .children(rows)
         .into_any_element()
 }
@@ -1555,13 +1608,24 @@ fn render_loading_metric_row() -> gpui::AnyElement {
         .into_any_element()
 }
 
-fn render_rate_window(label: &str, window: &RateWindow, settings: &AppSettings) -> gpui::AnyElement {
+fn render_rate_window(
+    label: &str,
+    window: &RateWindow,
+    settings: &AppSettings,
+    accent: Hsla,
+    cx: &App,
+) -> gpui::AnyElement {
     let percent = if settings.show_used {
         window.used_percent
     } else {
         window.remaining_percent()
     };
     let percent_label = if settings.show_used { "used" } else { "left" };
+    let show_reset = window.resets_at.is_some()
+        || window
+            .reset_description
+            .as_ref()
+            .is_some_and(|description| !description.trim().is_empty());
     let reset_text = format_reset(
         window.resets_at,
         settings.show_absolute_reset,
@@ -1570,25 +1634,38 @@ fn render_rate_window(label: &str, window: &RateWindow, settings: &AppSettings) 
 
     let bar = Progress::new(format!("bar-{}-{label}", percent as u64))
         .value(percent as f32)
-        .color(gpui::rgba(0x50AAFFFF));
+        .color(accent);
 
     div()
         .flex()
         .flex_col()
-        .gap(px(4.0))
+        .gap(px(6.0))
+        .child(Label::new(label.to_string()).text_sm().font_semibold())
+        .child(bar)
         .child(
             div()
                 .flex()
                 .justify_between()
-                .child(Label::new(label.to_string()))
-                .child(Label::new(format!("{percent:.0}% {percent_label}")).text_sm()),
+                .child(
+                    Label::new(format!("{percent:.0}% {percent_label}"))
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground),
+                )
+                .when(show_reset, |this| {
+                    this.child(
+                        Label::new(reset_text)
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground),
+                    )
+                }),
         )
-        .child(bar)
-        .child(Label::new(reset_text).text_sm())
         .into_any_element()
 }
 
-fn render_status_indicator(indicator: Option<ProviderStatusIndicator>) -> gpui::AnyElement {
+fn render_status_indicator(
+    indicator: Option<ProviderStatusIndicator>,
+    cx: &App,
+) -> gpui::AnyElement {
     let (color, label) = match indicator.unwrap_or(ProviderStatusIndicator::Unknown) {
         ProviderStatusIndicator::None => (gpui::rgba(0x50C878FF), "Operational"),
         ProviderStatusIndicator::Minor => (gpui::rgba(0xFFC850FF), "Minor"),
@@ -1603,22 +1680,272 @@ fn render_status_indicator(indicator: Option<ProviderStatusIndicator>) -> gpui::
         .items_center()
         .gap(px(6.0))
         .child(div().w(px(8.0)).h(px(8.0)).rounded_full().bg(color))
-        .child(Label::new(label))
+        .child(Label::new(label).text_sm().text_color(cx.theme().muted_foreground))
         .into_any_element()
 }
 
-fn render_last_refresh(last_refresh: Option<OffsetDateTime>) -> gpui::AnyElement {
-    let text = last_refresh
-        .map(|time| {
-            let minutes = (OffsetDateTime::now_utc() - time).whole_minutes();
-            if minutes <= 1 {
-                "Updated just now".to_string()
-            } else {
-                format!("Updated {minutes}m ago")
+struct GlanceSummary {
+    next_reset: Option<OffsetDateTime>,
+    highest_used: Option<f64>,
+    stale_count: usize,
+}
+
+fn provider_is_enabled(provider: &ProviderState) -> bool {
+    provider
+        .config
+        .enabled
+        .unwrap_or(provider.metadata.default_enabled)
+}
+
+fn build_glance_summary(
+    providers: &[ProviderState],
+    now: OffsetDateTime,
+) -> Option<GlanceSummary> {
+    let mut has_snapshot = false;
+    let mut next_reset: Option<OffsetDateTime> = None;
+    let mut highest_used: Option<f64> = None;
+    let mut stale_count = 0;
+
+    for provider in providers.iter().filter(|provider| provider_is_enabled(provider)) {
+        let usage = provider.payload.as_ref().and_then(|payload| payload.usage.as_ref());
+        let Some(snapshot) = usage else { continue; };
+        has_snapshot = true;
+
+        if now - snapshot.updated_at > Duration::minutes(30) {
+            stale_count += 1;
+        }
+
+        for window in [
+            snapshot.primary.as_ref(),
+            snapshot.secondary.as_ref(),
+            snapshot.tertiary.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let used = clamp_percent(window.used_percent);
+            highest_used = Some(highest_used.map_or(used, |current| current.max(used)));
+            if let Some(resets_at) = window.resets_at {
+                if resets_at > now {
+                    next_reset = Some(next_reset.map_or(resets_at, |current| current.min(resets_at)));
+                }
             }
-        })
-        .unwrap_or_else(|| "Not updated yet".to_string());
-    Label::new(text).into_any_element()
+        }
+    }
+
+    if !has_snapshot {
+        return None;
+    }
+
+    if next_reset.is_none() && highest_used.is_none() && stale_count == 0 {
+        return None;
+    }
+
+    Some(GlanceSummary {
+        next_reset,
+        highest_used,
+        stale_count,
+    })
+}
+
+fn render_glance_strip(summary: &GlanceSummary, now: OffsetDateTime, cx: &App) -> gpui::AnyElement {
+    let mut pills: Vec<gpui::AnyElement> = Vec::new();
+
+    if let Some(next_reset) = summary.next_reset {
+        let value = format_next_reset_value(next_reset, now);
+        pills.push(render_glance_pill("Next reset", &value, cx));
+    }
+
+    if let Some(highest_used) = summary.highest_used {
+        pills.push(render_glance_pill(
+            "Highest used",
+            &format!("{highest_used:.0}% used"),
+            cx,
+        ));
+    }
+
+    if summary.stale_count > 0 {
+        pills.push(render_glance_pill(
+            "Stale providers",
+            &summary.stale_count.to_string(),
+            cx,
+        ));
+    }
+
+    div()
+        .flex()
+        .flex_wrap()
+        .gap(px(8.0))
+        .children(pills)
+        .with_animation(
+            "glance-fade",
+            Animation::new(StdDuration::from_millis(150))
+                .with_easing(cubic_bezier(0.25, 1.0, 0.5, 1.0)),
+            |this, delta| this.opacity(0.4 + (0.6 * delta)),
+        )
+        .into_any_element()
+}
+
+fn render_glance_pill(label: &str, value: &str, cx: &App) -> gpui::AnyElement {
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(2.0))
+        .paddings(px(8.0))
+        .rounded_md()
+        .border_1()
+        .bg(cx.theme().secondary.opacity(0.5))
+        .child(
+            Label::new(label.to_string())
+                .text_xs()
+                .text_color(cx.theme().muted_foreground),
+        )
+        .child(Label::new(value.to_string()).text_sm().font_semibold())
+        .into_any_element()
+}
+
+fn provider_updated_text(
+    usage: Option<&UsageSnapshot>,
+    error: Option<&ProviderErrorPayload>,
+    is_loading: bool,
+    now: OffsetDateTime,
+) -> String {
+    if is_loading {
+        return "Updating...".to_string();
+    }
+
+    if let Some(snapshot) = usage {
+        return format_updated_string(snapshot.updated_at, now);
+    }
+
+    if error.is_some() {
+        return "Last refresh failed".to_string();
+    }
+
+    "No data yet".to_string()
+}
+
+fn format_updated_string(updated_at: OffsetDateTime, now: OffsetDateTime) -> String {
+    let diff = now - updated_at;
+    let seconds = diff.whole_seconds().abs();
+    if seconds < 60 {
+        return "Updated just now".to_string();
+    }
+
+    if seconds < 60 * 60 {
+        let minutes = (seconds / 60).max(1);
+        return format!("Updated {minutes}m ago");
+    }
+
+    if seconds < 60 * 60 * 24 {
+        let hours = (seconds / 3600).max(1);
+        return format!("Updated {hours}h ago");
+    }
+
+    let format = time::format_description::parse("[hour repr:12]:[minute padding:zero] [period]").ok();
+    if let Some(format) = format {
+        if let Ok(text) = updated_at.format(&format) {
+            return format!("Updated {text}");
+        }
+    }
+
+    "Updated".to_string()
+}
+
+fn format_next_reset_value(resets_at: OffsetDateTime, now: OffsetDateTime) -> String {
+    let diff = resets_at - now;
+    if diff.is_negative() {
+        return "soon".to_string();
+    }
+
+    if diff.whole_seconds() < 60 {
+        return "now".to_string();
+    }
+
+    let hours = diff.whole_hours();
+    let minutes = (diff - Duration::hours(hours)).whole_minutes().max(1);
+    if hours > 0 {
+        format!("in {hours}h {minutes}m")
+    } else {
+        format!("in {minutes}m")
+    }
+}
+
+fn status_badge(label: &str, cx: &App) -> gpui::AnyElement {
+    div()
+        .rounded_sm()
+        .border_1()
+        .bg(cx.theme().danger.opacity(0.12))
+        .paddings(px(4.0))
+        .child(
+            Label::new(label.to_string())
+                .text_xs()
+                .text_color(cx.theme().danger_foreground),
+        )
+        .into_any_element()
+}
+
+fn render_credits_row(remaining: f64, cx: &App) -> gpui::AnyElement {
+    div()
+        .flex()
+        .items_center()
+        .justify_between()
+        .child(
+            Label::new("Credits remaining")
+                .text_sm()
+                .text_color(cx.theme().muted_foreground),
+        )
+        .child(Label::new(format!("{remaining:.2}")).text_sm().font_semibold())
+        .into_any_element()
+}
+
+fn render_error_row(message: &str, cx: &App) -> gpui::AnyElement {
+    div()
+        .rounded_md()
+        .border_1()
+        .bg(cx.theme().danger.opacity(0.12))
+        .paddings(px(10.0))
+        .child(
+            Label::new(message.to_string())
+                .text_sm()
+                .text_color(cx.theme().danger_foreground),
+        )
+        .into_any_element()
+}
+
+fn section_divider(cx: &App) -> gpui::AnyElement {
+    div()
+        .h(px(1.0))
+        .bg(cx.theme().border.opacity(0.6))
+        .into_any_element()
+}
+
+fn provider_accent_color(_provider_id: ProviderId, cx: &App) -> Hsla {
+    cx.theme().accent
+}
+
+fn clamp_percent(value: f64) -> f64 {
+    value.max(0.0).min(100.0)
+}
+
+fn render_last_refresh(
+    last_refresh: Option<OffsetDateTime>,
+    refreshing: bool,
+    now: OffsetDateTime,
+    cx: &App,
+) -> gpui::AnyElement {
+    let text = if refreshing {
+        "Updating...".to_string()
+    } else {
+        last_refresh
+            .map(|time| format_updated_string(time, now))
+            .unwrap_or_else(|| "Not updated yet".to_string())
+    };
+
+    Label::new(text)
+        .text_sm()
+        .text_color(cx.theme().muted_foreground)
+        .into_any_element()
 }
 
 const SOURCE_MODES_NONE: &[ProviderSourceMode] = &[];
