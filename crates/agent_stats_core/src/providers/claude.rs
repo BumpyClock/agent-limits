@@ -1035,6 +1035,12 @@ enum ClaudePtyStopReason {
     ChannelClosed,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ClaudePtyPromptInfo {
+    prompt_seen: bool,
+    prompt_wait_ms: u128,
+}
+
 fn run_claude_pty_usage_with_args(binary: &str, extra_args: &[&str]) -> Result<String, String> {
     let pty_system = native_pty_system();
     let pty_pair = pty_system
@@ -1146,7 +1152,8 @@ fn run_claude_pty_usage_with_args(binary: &str, extra_args: &[&str]) -> Result<S
     let mut stopped_early = false;
     let mut stop_reason = ClaudePtyStopReason::Timeout;
 
-    let prompt_deadline = Instant::now() + Duration::from_secs(6);
+    let prompt_start = Instant::now();
+    let prompt_deadline = prompt_start + Duration::from_secs(6);
     let mut prompt_seen = false;
     let mut prompt_scan = RollingBuffer::new(
         prompt_needles
@@ -1193,6 +1200,7 @@ fn run_claude_pty_usage_with_args(binary: &str, extra_args: &[&str]) -> Result<S
     writer
         .write_all(b"/usage\r")
         .map_err(|error| format!("Failed to send Claude CLI command: {error}"))?;
+    let prompt_wait_ms = prompt_start.elapsed().as_millis();
 
 
     loop {
@@ -1277,7 +1285,17 @@ fn run_claude_pty_usage_with_args(binary: &str, extra_args: &[&str]) -> Result<S
     }
 
     if claude_cli_debug_enabled() {
-        dump_claude_cli_debug(binary, extra_args, &working_dir, &buffer, &stop_reason);
+        dump_claude_cli_debug(
+            binary,
+            extra_args,
+            &working_dir,
+            &buffer,
+            &stop_reason,
+            ClaudePtyPromptInfo {
+                prompt_seen,
+                prompt_wait_ms,
+            },
+        );
     }
 
     String::from_utf8(buffer).map_err(|error| {
@@ -1312,6 +1330,7 @@ fn dump_claude_cli_debug(
     working_dir: &std::path::Path,
     output: &[u8],
     stop_reason: &ClaudePtyStopReason,
+    prompt_info: ClaudePtyPromptInfo,
 ) {
     let Some(path) = claude_cli_debug_path() else {
         return;
@@ -1323,9 +1342,11 @@ fn dump_claude_cli_debug(
     let reason = format_stop_reason(stop_reason);
     let content = String::from_utf8_lossy(output);
     let log_body = format!(
-        "timestamp={timestamp}\nreason={reason}\nbinary={binary}\nargs={:?}\ncwd={}\nraw_output:\n{}\n",
+        "timestamp={timestamp}\nreason={reason}\nbinary={binary}\nargs={:?}\ncwd={}\nprompt_seen={}\nprompt_wait_ms={}\nraw_output:\n{}\n",
         extra_args,
         working_dir.display(),
+        prompt_info.prompt_seen,
+        prompt_info.prompt_wait_ms,
         content
     );
 

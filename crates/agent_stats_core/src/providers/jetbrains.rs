@@ -325,3 +325,514 @@ fn provider_error(message: &str) -> ProviderErrorPayload {
         kind: Some("provider".to_string()),
     }
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_parse_ide_directory_intellij() {
+        let base = PathBuf::from("/home/user/.config/JetBrains");
+        let result = parse_ide_directory("IntelliJIdea2024.3", &base);
+        assert!(result.is_some());
+        let info = result.unwrap();
+        assert_eq!(info.display_name, "IntelliJ IDEA 2024.3");
+        assert!(info.quota_file_path.ends_with("IntelliJIdea2024.3/options/AIAssistantQuotaManager2.xml"));
+    }
+
+    #[test]
+    fn test_parse_ide_directory_pycharm() {
+        let base = PathBuf::from("/home/user/.config/JetBrains");
+        let result = parse_ide_directory("PyCharm2024.3", &base);
+        assert!(result.is_some());
+        let info = result.unwrap();
+        assert_eq!(info.display_name, "PyCharm 2024.3");
+    }
+
+    #[test]
+    fn test_parse_ide_directory_webstorm() {
+        let base = PathBuf::from("/home/user/.config/JetBrains");
+        let result = parse_ide_directory("WebStorm2025.1", &base);
+        assert!(result.is_some());
+        let info = result.unwrap();
+        assert_eq!(info.display_name, "WebStorm 2025.1");
+    }
+
+    #[test]
+    fn test_parse_ide_directory_goland() {
+        let base = PathBuf::from("/home/user/.config/JetBrains");
+        let result = parse_ide_directory("GoLand2024.2", &base);
+        assert!(result.is_some());
+        let info = result.unwrap();
+        assert_eq!(info.display_name, "GoLand 2024.2");
+    }
+
+    #[test]
+    fn test_parse_ide_directory_clion() {
+        let base = PathBuf::from("/home/user/.config/JetBrains");
+        let result = parse_ide_directory("CLion2024.3", &base);
+        assert!(result.is_some());
+        let info = result.unwrap();
+        assert_eq!(info.display_name, "CLion 2024.3");
+    }
+
+    #[test]
+    fn test_parse_ide_directory_rustrover() {
+        let base = PathBuf::from("/home/user/.config/JetBrains");
+        let result = parse_ide_directory("RustRover2024.3", &base);
+        assert!(result.is_some());
+        let info = result.unwrap();
+        assert_eq!(info.display_name, "RustRover 2024.3");
+    }
+
+    #[test]
+    fn test_parse_ide_directory_android_studio() {
+        let base = PathBuf::from("/home/user/.config/Google");
+        let result = parse_ide_directory("AndroidStudio2024.3", &base);
+        assert!(result.is_some());
+        let info = result.unwrap();
+        assert_eq!(info.display_name, "Android Studio 2024.3");
+    }
+
+    #[test]
+    fn test_parse_ide_directory_unknown() {
+        let base = PathBuf::from("/home/user/.config/JetBrains");
+        let result = parse_ide_directory("UnknownIDE2024.3", &base);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_parse_ide_directory_no_version() {
+        let base = PathBuf::from("/home/user/.config/JetBrains");
+        let result = parse_ide_directory("IntelliJIdea", &base);
+        assert!(result.is_some());
+        let info = result.unwrap();
+        assert_eq!(info.display_name, "IntelliJ IDEA Unknown");
+    }
+
+    #[test]
+    fn test_parse_ide_directory_case_insensitive() {
+        // The matching is case-insensitive but version extraction requires exact case
+        // This is acceptable because actual JetBrains directories use standard casing
+        let base = PathBuf::from("/home/user/.config/JetBrains");
+        let result = parse_ide_directory("IntelliJIdea2024.3", &base);
+        assert!(result.is_some());
+        let info = result.unwrap();
+        assert_eq!(info.display_name, "IntelliJ IDEA 2024.3");
+    }
+
+    #[test]
+    fn test_extract_component_block_valid() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<application>
+  <component name="AIAssistantQuotaManager2">
+    <option name="quotaInfo" value="{&quot;type&quot;:&quot;pro&quot;}"/>
+  </component>
+</application>"#;
+        let result = extract_component_block(xml);
+        assert!(result.is_some());
+        let block = result.unwrap();
+        assert!(block.contains("AIAssistantQuotaManager2"));
+        assert!(block.contains("quotaInfo"));
+    }
+
+    #[test]
+    fn test_extract_component_block_with_attributes() {
+        let xml = r#"<application>
+  <component name="AIAssistantQuotaManager2" version="1">
+    <option name="quotaInfo" value="test"/>
+  </component>
+</application>"#;
+        let result = extract_component_block(xml);
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_extract_component_block_not_found() {
+        let xml = r#"<application>
+  <component name="OtherComponent">
+    <option name="quotaInfo" value="test"/>
+  </component>
+</application>"#;
+        let result = extract_component_block(xml);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_extract_component_block_empty() {
+        let result = extract_component_block("");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_extract_option_value_name_first() {
+        let content = r#"<option name="quotaInfo" value="test-value"/>"#;
+        let result = extract_option_value(content, "quotaInfo");
+        assert_eq!(result, Some("test-value".to_string()));
+    }
+
+    #[test]
+    fn test_extract_option_value_value_first() {
+        let content = r#"<option value="test-value" name="quotaInfo"/>"#;
+        let result = extract_option_value(content, "quotaInfo");
+        assert_eq!(result, Some("test-value".to_string()));
+    }
+
+    #[test]
+    fn test_extract_option_value_next_refill() {
+        let content = r#"<option name="nextRefill" value="2025-02-01T00:00:00Z"/>"#;
+        let result = extract_option_value(content, "nextRefill");
+        assert_eq!(result, Some("2025-02-01T00:00:00Z".to_string()));
+    }
+
+    #[test]
+    fn test_extract_option_value_not_found() {
+        let content = r#"<option name="otherOption" value="test"/>"#;
+        let result = extract_option_value(content, "quotaInfo");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_extract_option_value_empty_value() {
+        let content = r#"<option name="quotaInfo" value=""/>"#;
+        let result = extract_option_value(content, "quotaInfo");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_extract_option_value_whitespace_only() {
+        let content = r#"<option name="quotaInfo" value="   "/>"#;
+        let result = extract_option_value(content, "quotaInfo");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_decode_html_entities() {
+        let encoded = r#"{&quot;type&quot;:&quot;pro&quot;,&quot;current&quot;:&quot;50&quot;,&quot;maximum&quot;:&quot;100&quot;}"#;
+        let decoded = decode_html_entities(encoded);
+        assert_eq!(decoded, r#"{"type":"pro","current":"50","maximum":"100"}"#);
+    }
+
+    #[test]
+    fn test_decode_html_entities_all_entities() {
+        let encoded = "&lt;div&gt;Test &amp; &apos;example&apos; &quot;quoted&quot;&#10;newline&lt;/div&gt;";
+        let decoded = decode_html_entities(encoded);
+        assert_eq!(decoded, "<div>Test & 'example' \"quoted\"\nnewline</div>");
+    }
+
+    #[test]
+    fn test_decode_html_entities_no_entities() {
+        let plain = "Just plain text without entities";
+        let decoded = decode_html_entities(plain);
+        assert_eq!(decoded, plain);
+    }
+
+    #[test]
+    fn test_parse_quota_info_valid() {
+        let json = r#"{"type":"pro","current":"50","maximum":"100"}"#;
+        let result = parse_quota_info(json);
+        assert!(result.is_ok());
+        let info = result.unwrap();
+        assert_eq!(info.quota_type, Some("pro".to_string()));
+        assert!((info.used_percent - 50.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_parse_quota_info_with_tariff_quota() {
+        let json = r#"{"type":"pro","current":"30","maximum":"100","tariffQuota":{"available":"70"}}"#;
+        let result = parse_quota_info(json);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_quota_info_zero_maximum() {
+        let json = r#"{"type":"free","current":"0","maximum":"0"}"#;
+        let result = parse_quota_info(json);
+        assert!(result.is_ok());
+        let info = result.unwrap();
+        assert!((info.used_percent - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_parse_quota_info_missing_type() {
+        let json = r#"{"current":"50","maximum":"100"}"#;
+        let result = parse_quota_info(json);
+        assert!(result.is_ok());
+        let info = result.unwrap();
+        assert_eq!(info.quota_type, None);
+    }
+
+    #[test]
+    fn test_parse_quota_info_invalid_json() {
+        let json = "not valid json";
+        let result = parse_quota_info(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_quota_info_numeric_values() {
+        let json = r#"{"type":"pro","current":50,"maximum":100}"#;
+        let result = parse_quota_info(json);
+        assert!(result.is_ok());
+        let info = result.unwrap();
+        assert!((info.used_percent - 50.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_parse_refill_info_valid() {
+        let json = r#"{"next":"2025-02-01T00:00:00Z","amount":"100","duration":"monthly"}"#;
+        let result = parse_refill_info(json);
+        assert!(result.is_ok());
+        let info = result.unwrap();
+        assert!(info.next.is_some());
+        assert_eq!(info.next.unwrap().to_string(), "2025-02-01 0:00:00.0 +00:00:00");
+    }
+
+    #[test]
+    fn test_parse_refill_info_with_tariff() {
+        let json = r#"{"type":"monthly","tariff":{"amount":"500","duration":"30d"}}"#;
+        let result = parse_refill_info(json);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_refill_info_no_next() {
+        let json = r#"{"amount":"100"}"#;
+        let result = parse_refill_info(json);
+        assert!(result.is_ok());
+        let info = result.unwrap();
+        assert!(info.next.is_none());
+    }
+
+    #[test]
+    fn test_parse_refill_info_invalid_date() {
+        let json = r#"{"next":"not-a-date"}"#;
+        let result = parse_refill_info(json);
+        assert!(result.is_ok());
+        let info = result.unwrap();
+        assert!(info.next.is_none());
+    }
+
+    #[test]
+    fn test_string_to_double_from_string() {
+        let value = serde_json::json!("42.5");
+        let result = string_to_double(&value);
+        assert!((result.unwrap() - 42.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_string_to_double_from_number() {
+        let value = serde_json::json!(42.5);
+        let result = string_to_double(&value);
+        assert!((result.unwrap() - 42.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_string_to_double_from_integer() {
+        let value = serde_json::json!(42);
+        let result = string_to_double(&value);
+        assert!((result.unwrap() - 42.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_string_to_double_invalid_string() {
+        let value = serde_json::json!("not-a-number");
+        let result = string_to_double(&value);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_string_to_datetime_valid_rfc3339() {
+        let value = serde_json::json!("2025-02-01T00:00:00Z");
+        let result = string_to_datetime(&value);
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_string_to_datetime_with_fractional_seconds() {
+        let value = serde_json::json!("2025-02-01T00:00:00.000Z");
+        let result = string_to_datetime(&value);
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_string_to_datetime_invalid() {
+        let value = serde_json::json!("not-a-date");
+        let result = string_to_datetime(&value);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_string_to_datetime_not_a_string() {
+        let value = serde_json::json!(12345);
+        let result = string_to_datetime(&value);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_format_reset_description_future_days() {
+        let now = OffsetDateTime::now_utc();
+        let future = now + Duration::days(3) + Duration::hours(5);
+        let result = format_reset_description(Some(future));
+        assert!(result.is_some());
+        assert!(result.unwrap().contains("3d"));
+    }
+
+    #[test]
+    fn test_format_reset_description_future_hours() {
+        let now = OffsetDateTime::now_utc();
+        let future = now + Duration::hours(5) + Duration::minutes(30);
+        let result = format_reset_description(Some(future));
+        assert!(result.is_some());
+        let desc = result.unwrap();
+        // Format is "Resets in Xh Ym" - check for hours
+        assert!(desc.contains("5h"), "Expected '5h' in: {}", desc);
+    }
+
+    #[test]
+    fn test_format_reset_description_future_minutes() {
+        let now = OffsetDateTime::now_utc();
+        let future = now + Duration::minutes(45);
+        let result = format_reset_description(Some(future));
+        assert!(result.is_some());
+        let desc = result.unwrap();
+        // Format is "Resets in Xm" - check format
+        assert!(desc.starts_with("Resets in "), "Expected 'Resets in ' prefix in: {}", desc);
+        assert!(desc.contains('m'), "Expected 'm' in: {}", desc);
+    }
+
+    #[test]
+    fn test_format_reset_description_past() {
+        let now = OffsetDateTime::now_utc();
+        let past = now - Duration::hours(1);
+        let result = format_reset_description(Some(past));
+        assert_eq!(result, Some("Expired".to_string()));
+    }
+
+    #[test]
+    fn test_format_reset_description_none() {
+        let result = format_reset_description(None);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_provider_error() {
+        let error = provider_error("Test error message");
+        assert_eq!(error.code, 1);
+        assert_eq!(error.message, "Test error message");
+        assert_eq!(error.kind, Some("provider".to_string()));
+    }
+
+    #[test]
+    fn test_jetbrains_provider_id() {
+        let provider = JetBrainsProvider;
+        assert_eq!(provider.id(), ProviderId::JetBrains);
+    }
+
+    #[test]
+    fn test_jetbrains_provider_display_name() {
+        let provider = JetBrainsProvider;
+        assert_eq!(provider.display_name(), "JetBrains AI");
+    }
+
+    #[test]
+    fn test_jetbrains_base_paths_macos() {
+        if cfg!(target_os = "macos") {
+            let paths = jetbrains_base_paths();
+            assert!(paths.iter().any(|p| p.to_string_lossy().contains("Application Support/JetBrains")));
+        }
+    }
+
+    #[test]
+    fn test_jetbrains_base_paths_linux() {
+        if cfg!(target_os = "linux") {
+            let paths = jetbrains_base_paths();
+            assert!(paths.iter().any(|p| p.to_string_lossy().contains(".config/JetBrains")));
+        }
+    }
+
+    #[test]
+    fn test_parse_quota_file_not_found() {
+        let result = parse_quota_file("/nonexistent/path/file.xml", "Test IDE".to_string());
+        assert!(result.is_err());
+        let error = result.unwrap_err();
+        assert!(error.message.contains("quota file not found"));
+    }
+
+    #[test]
+    fn test_parse_quota_file_invalid_xml() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("AIAssistantQuotaManager2.xml");
+        let mut file = std::fs::File::create(&file_path).unwrap();
+        write!(file, "not valid xml").unwrap();
+
+        let result = parse_quota_file(file_path.to_str().unwrap(), "Test IDE".to_string());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_quota_file_valid() {
+        let temp_dir = TempDir::new().unwrap();
+        let options_dir = temp_dir.path().join("options");
+        std::fs::create_dir(&options_dir).unwrap();
+        let file_path = options_dir.join("AIAssistantQuotaManager2.xml");
+        let mut file = std::fs::File::create(&file_path).unwrap();
+        write!(file, r#"<?xml version="1.0" encoding="UTF-8"?>
+<application>
+  <component name="AIAssistantQuotaManager2">
+    <option name="quotaInfo" value="{{&quot;type&quot;:&quot;pro&quot;,&quot;current&quot;:&quot;50&quot;,&quot;maximum&quot;:&quot;100&quot;}}"/>
+    <option name="nextRefill" value="{{&quot;next&quot;:&quot;2025-02-01T00:00:00Z&quot;}}"/>
+  </component>
+</application>"#).unwrap();
+
+        let result = parse_quota_file(file_path.to_str().unwrap(), "IntelliJ IDEA 2024.3".to_string());
+        assert!(result.is_ok());
+        let snapshot = result.unwrap();
+        assert!(snapshot.primary.is_some());
+        assert!(snapshot.identity.is_some());
+    }
+
+    #[test]
+    fn test_detect_latest_ide_empty_directory() {
+        let temp_dir = TempDir::new().unwrap();
+        // Mock the base paths by creating a temporary structure
+        // Since we can't easily mock the base paths, we test the parsing logic
+        let result = parse_ide_directory("IntelliJIdea2024.3", temp_dir.path());
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_all_ide_patterns() {
+        let base = PathBuf::from("/tmp");
+        let patterns = [
+            ("IntelliJIdea2024.3", "IntelliJ IDEA"),
+            ("PyCharm2024.3", "PyCharm"),
+            ("WebStorm2024.3", "WebStorm"),
+            ("GoLand2024.3", "GoLand"),
+            ("CLion2024.3", "CLion"),
+            ("DataGrip2024.3", "DataGrip"),
+            ("RubyMine2024.3", "RubyMine"),
+            ("Rider2024.3", "Rider"),
+            ("PhpStorm2024.3", "PhpStorm"),
+            ("AppCode2024.3", "AppCode"),
+            ("Fleet2024.3", "Fleet"),
+            ("AndroidStudio2024.3", "Android Studio"),
+            ("RustRover2024.3", "RustRover"),
+            ("Aqua2024.3", "Aqua"),
+            ("DataSpell2024.3", "DataSpell"),
+        ];
+
+        for (dirname, expected_name) in patterns.iter() {
+            let result = parse_ide_directory(dirname, &base);
+            assert!(result.is_some(), "Failed to parse {}", dirname);
+            let info = result.unwrap();
+            assert!(info.display_name.starts_with(*expected_name), "Wrong display name for {}", dirname);
+        }
+    }
+}

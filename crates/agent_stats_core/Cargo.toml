@@ -22,3 +22,8 @@ which.workspace = true
 toml.workspace = true
 ureq.workspace = true
 portable-pty.workspace = true
+keyring.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
