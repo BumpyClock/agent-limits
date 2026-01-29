@@ -30,6 +30,7 @@ pub struct ProviderFetchContext {
     pub source_override: Option<ProviderSourceMode>,
     pub include_status: bool,
     pub now: OffsetDateTime,
+    pub oauth_token_override: Option<String>,
 }
 
 impl ProviderFetchContext {

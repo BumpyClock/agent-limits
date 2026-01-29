@@ -1,5 +1,6 @@
 This is a pure rust + GPUI application that allows the user to see the current limits of various AI agent subscriptions that they have. There is a reference implementaion in references/CodexBar. We will implement a pure rust + GPUI port of it.
 
+The port must be a 1:1 match for references/CodexBar in terms of functionality and UI.
 
 `/Users/adityasharma/Projects/friday_v2/terminal-app` is a good starting point on how to use GPUI and GPUI components. 
 

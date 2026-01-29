@@ -6,7 +6,12 @@ use crate::models::{
 use crate::provider_metadata::ProviderId;
 
 use super::{Provider, ProviderFetchContext};
+use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use serde::Deserialize;
+use std::io::{Read, Write};
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, Instant};
 use time::OffsetDateTime;
 
 pub struct ClaudeProvider;
@@ -27,7 +32,7 @@ impl Provider for ClaudeProvider {
         let source_mode = context.source_mode();
         let result = match source_mode {
             ProviderSourceMode::Auto => fetch_auto(context),
-            ProviderSourceMode::Oauth => fetch_via_oauth(),
+            ProviderSourceMode::Oauth => fetch_via_oauth(context),
             ProviderSourceMode::Web => fetch_via_web(context),
             ProviderSourceMode::Cli => fetch_via_cli(),
             ProviderSourceMode::Api => {
@@ -61,11 +66,16 @@ impl Provider for ClaudeProvider {
 fn fetch_auto(
     context: &ProviderFetchContext,
 ) -> Result<(UsageSnapshot, &'static str), ProviderErrorPayload> {
+    if context.oauth_token_override.as_ref().is_some() {
+        log::debug!("Claude: using OAuth override token from token accounts");
+        return fetch_via_oauth(context);
+    }
+
     // Priority 1: OAuth credentials with user:profile scope
     match load_oauth_credentials() {
         Ok(credentials) if credentials.has_usage_scope() && !credentials.is_expired() => {
             log::debug!("Claude: using OAuth credentials (user:profile scope present)");
-            return fetch_via_oauth();
+            return fetch_via_oauth(context);
         }
         Ok(credentials) if credentials.is_expired() => {
             log::debug!("Claude: OAuth credentials found but expired, falling back");
@@ -103,8 +113,13 @@ fn fetch_auto(
 const OAUTH_USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 const OAUTH_BETA_HEADER: &str = "oauth-2025-04-20";
 
-fn fetch_via_oauth() -> Result<(UsageSnapshot, &'static str), ProviderErrorPayload> {
-    let credentials = load_oauth_credentials().map_err(|error| provider_error(&error))?;
+fn fetch_via_oauth(
+    context: &ProviderFetchContext,
+) -> Result<(UsageSnapshot, &'static str), ProviderErrorPayload> {
+    let credentials = load_oauth_credentials_with_override(
+        context.oauth_token_override.as_deref(),
+    )
+    .map_err(|error| provider_error(&error))?;
 
     if credentials.is_expired() {
         return Err(provider_error(
@@ -346,6 +361,26 @@ impl OAuthCredentials {
     fn has_usage_scope(&self) -> bool {
         self.scopes.iter().any(|scope| scope == "user:profile")
     }
+}
+
+fn load_oauth_credentials_with_override(
+    override_token: Option<&str>,
+) -> Result<OAuthCredentials, String> {
+    if let Some(raw_token) = override_token {
+        let token = raw_token.trim();
+        if !token.is_empty() {
+            return Ok(OAuthCredentials {
+                access_token: token.to_string(),
+                refresh_token: None,
+                expires_at: None,
+                scopes: vec!["user:profile".to_string()],
+                rate_limit_tier: None,
+                from_environment: true,
+            });
+        }
+    }
+
+    load_oauth_credentials()
 }
 
 fn load_oauth_credentials() -> Result<OAuthCredentials, String> {
@@ -892,13 +927,16 @@ fn infer_plan_from_web_account(
 
 fn fetch_via_cli() -> Result<(UsageSnapshot, &'static str), ProviderErrorPayload> {
     let claude_binary = resolve_claude_binary().ok_or_else(|| {
+        let diagnostics = format_cli_environment_diagnostics(resolve_login_shell_path().as_deref());
         provider_error(
-            "Claude CLI is not installed or not on PATH. \
-             Install it from https://docs.anthropic.com/en/docs/claude-code.",
+            &format!(
+                "Claude CLI is not installed or not on PATH. \
+                 Install it from https://docs.anthropic.com/en/docs/claude-code.{diagnostics}"
+            ),
         )
     })?;
 
-    let usage_output = run_claude_command(&claude_binary, &["-p", "/usage", "--no-input"])
+    let usage_output = run_claude_pty_usage(&claude_binary)
         .map_err(|error| provider_error(&format!("Claude CLI usage probe failed: {error}")))?;
 
     let clean = strip_ansi_codes(&usage_output);
@@ -921,37 +959,494 @@ fn resolve_claude_binary() -> Option<String> {
     }
 
     // Use `which` crate to locate the binary on PATH
-    which::which("claude")
+    if let Some(path) = which::which("claude")
         .ok()
         .and_then(|path| path.to_str().map(|path| path.to_string()))
-}
-
-fn run_claude_command(binary: &str, args: &[&str]) -> Result<String, String> {
-    let output = std::process::Command::new(binary)
-        .args(args)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .output()
-        .map_err(|error| format!("Failed to launch Claude CLI ({binary}): {error}"))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let combined = if stderr.trim().is_empty() {
-            stdout.to_string()
-        } else {
-            format!("{stdout}\n{stderr}")
-        };
-        return Err(format!(
-            "Claude CLI exited with status {}: {}",
-            output.status,
-            truncate_body(&combined, 500)
-        ));
+    {
+        return Some(path);
     }
 
-    String::from_utf8(output.stdout)
-        .map_err(|error| format!("Claude CLI output was not valid UTF-8: {error}"))
+    if let Some(path) = resolve_claude_binary_from_login_shell() {
+        return Some(path);
+    }
+
+    resolve_claude_binary_from_common_paths()
+}
+
+fn resolve_claude_binary_from_login_shell() -> Option<String> {
+    run_login_shell_command("command -v claude")
+}
+
+fn resolve_login_shell_path() -> Option<String> {
+    run_login_shell_command("echo $PATH")
+}
+
+fn resolve_claude_binary_from_common_paths() -> Option<String> {
+    const COMMON_CLAUDE_PATHS: &[&str] = &["/opt/homebrew/bin/claude", "/usr/local/bin/claude"];
+    for candidate in COMMON_CLAUDE_PATHS {
+        if std::path::Path::new(candidate).is_file() {
+            return Some((*candidate).to_string());
+        }
+    }
+    None
+}
+
+fn run_login_shell_command(command: &str) -> Option<String> {
+    let output = std::process::Command::new("/bin/zsh")
+        .args(["-lc", command])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8(output.stdout).ok()?;
+    let trimmed = stdout.lines().next().unwrap_or("").trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn run_claude_pty_usage(binary: &str) -> Result<String, String> {
+    let output = run_claude_pty_usage_with_args(binary, &["--allowed-tools", ""]);
+    match output {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            if is_cli_unknown_option_allowed_tools(&error) {
+                run_claude_pty_usage_with_args(binary, &[])
+            } else {
+                Err(error)
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+enum ClaudePtyStopReason {
+    Timeout,
+    StopNeedle(String),
+    ProcessExit,
+    ChannelClosed,
+}
+
+fn run_claude_pty_usage_with_args(binary: &str, extra_args: &[&str]) -> Result<String, String> {
+    let pty_system = native_pty_system();
+    let pty_pair = pty_system
+        .openpty(PtySize {
+            rows: 50,
+            cols: 160,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .map_err(|error| format!("Failed to open Claude PTY: {error}"))?;
+
+    let working_dir = claude_probe_working_directory();
+    if claude_cli_debug_enabled() {
+        log::debug!(
+            "Claude PTY starting (binary={binary}, args={:?}, cwd={})",
+            extra_args,
+            working_dir.display()
+        );
+    }
+    let mut command = CommandBuilder::new(binary);
+    command.args(extra_args);
+    command.cwd(&working_dir);
+
+    for (key, value) in build_claude_cli_environment(&working_dir) {
+        command.env(key, value);
+    }
+
+    let mut child = pty_pair
+        .slave
+        .spawn_command(command)
+        .map_err(|error| format!("Failed to launch Claude CLI session: {error}"))?;
+    drop(pty_pair.slave);
+
+    let mut reader = pty_pair
+        .master
+        .try_clone_reader()
+        .map_err(|error| format!("Failed to capture Claude CLI output: {error}"))?;
+    let mut writer = pty_pair
+        .master
+        .take_writer()
+        .map_err(|error| format!("Failed to send Claude CLI input: {error}"))?;
+
+    let (tx, rx) = mpsc::channel::<Vec<u8>>();
+    let reader_thread = thread::spawn(move || {
+        let mut buffer = [0u8; 4096];
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(count) => {
+                    if tx.send(buffer[..count].to_vec()).is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    let boot_delay = Duration::from_millis(400);
+    thread::sleep(boot_delay);
+    while rx.try_recv().is_ok() {}
+
+    let stop_needles = [
+        "Current session",
+        "Failed to load usage data",
+        "failed to load usage data",
+    ];
+    let send_on_substrings = [
+        ("Do you trust the files in this folder?", "y\r"),
+        ("Ready to code here?", "\r"),
+        ("Press Enter to continue", "\r"),
+        ("Show plan usage limits", "\r"),
+        ("Show Claude Code status", "\r"),
+    ];
+
+    let stop_needles: Vec<Vec<u8>> = stop_needles.iter().map(|item| item.as_bytes().to_vec()).collect();
+    let send_on_substrings: Vec<(Vec<u8>, Vec<u8>)> = send_on_substrings
+        .iter()
+        .map(|(needle, response)| (needle.as_bytes().to_vec(), response.as_bytes().to_vec()))
+        .collect();
+    let max_needle = stop_needles
+        .iter()
+        .map(|item| item.len())
+        .chain(send_on_substrings.iter().map(|item| item.0.len()))
+        .max()
+        .unwrap_or(1);
+
+    let timeout = Duration::from_secs(20);
+    let settle_after_stop = Duration::from_secs(2);
+    let send_enter_every = Duration::from_millis(800);
+    let cursor_query = [0x1B, 0x5B, 0x36, 0x6E];
+    let cursor_reply = [0x1B, 0x5B, 0x31, 0x3B, 0x31, 0x52];
+    let mut next_cursor_check = Instant::now();
+    let prompt_needles = [
+        "❯",
+        "Try \"",
+        "bypass permissions on",
+    ];
+    let prompt_needles: Vec<Vec<u8>> = prompt_needles
+        .iter()
+        .map(|needle| needle.as_bytes().to_vec())
+        .collect();
+
+    let start = Instant::now();
+    let mut last_enter = Instant::now();
+    let mut buffer: Vec<u8> = Vec::new();
+    let mut rolling = RollingBuffer::new(max_needle);
+    let mut triggered_send = vec![false; send_on_substrings.len()];
+    let mut stopped_early = false;
+    let mut stop_reason = ClaudePtyStopReason::Timeout;
+
+    let prompt_deadline = Instant::now() + Duration::from_secs(6);
+    let mut prompt_seen = false;
+    let mut prompt_scan = RollingBuffer::new(
+        prompt_needles
+            .iter()
+            .map(|needle| needle.len())
+            .max()
+            .unwrap_or(1),
+    );
+    while Instant::now() < prompt_deadline {
+        match rx.recv_timeout(Duration::from_millis(80)) {
+            Ok(chunk) => {
+                let scan = prompt_scan.append(&chunk);
+                if Instant::now() >= next_cursor_check
+                    && !scan.is_empty()
+                    && contains_bytes(&scan, &cursor_query)
+                {
+                    let _ = writer.write_all(&cursor_reply);
+                    next_cursor_check = Instant::now() + Duration::from_secs(1);
+                }
+                for (index, (needle, response)) in send_on_substrings.iter().enumerate() {
+                    if !triggered_send[index] && contains_bytes(&scan, needle) {
+                        let _ = writer.write_all(response);
+                        triggered_send[index] = true;
+                    }
+                }
+                if prompt_needles.iter().any(|needle| contains_bytes(&scan, needle)) {
+                    prompt_seen = true;
+                    break;
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                break;
+            }
+        }
+    }
+
+    if claude_cli_debug_enabled() && !prompt_seen {
+        log::debug!("Claude PTY prompt not detected before sending /usage");
+    }
+
+    while rx.try_recv().is_ok() {}
+
+    writer
+        .write_all(b"/usage\r")
+        .map_err(|error| format!("Failed to send Claude CLI command: {error}"))?;
+
+
+    loop {
+        if start.elapsed() >= timeout {
+            break;
+        }
+
+        match rx.recv_timeout(Duration::from_millis(80)) {
+            Ok(chunk) => {
+                buffer.extend_from_slice(&chunk);
+                let scan = rolling.append(&chunk);
+                if Instant::now() >= next_cursor_check
+                    && !scan.is_empty()
+                    && contains_bytes(&scan, &cursor_query)
+                {
+                    let _ = writer.write_all(&cursor_reply);
+                    next_cursor_check = Instant::now() + Duration::from_secs(1);
+                }
+
+                for (index, (needle, response)) in send_on_substrings.iter().enumerate() {
+                    if !triggered_send[index] && contains_bytes(&scan, needle) {
+                        let _ = writer.write_all(response);
+                        triggered_send[index] = true;
+                    }
+                }
+                if let Some((index, _)) = stop_needles
+                    .iter()
+                    .enumerate()
+                    .find(|(_, needle)| contains_bytes(&scan, needle))
+                {
+                    stopped_early = true;
+                    stop_reason = ClaudePtyStopReason::StopNeedle(
+                        String::from_utf8_lossy(&stop_needles[index]).to_string(),
+                    );
+                    break;
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                stop_reason = ClaudePtyStopReason::ChannelClosed;
+                break;
+            }
+        }
+
+        if last_enter.elapsed() >= send_enter_every {
+            let _ = writer.write_all(b"\r");
+            last_enter = Instant::now();
+        }
+
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                stop_reason = ClaudePtyStopReason::ProcessExit;
+                break;
+            }
+            Ok(None) => {}
+            Err(_) => {
+                stop_reason = ClaudePtyStopReason::ProcessExit;
+                break;
+            }
+        }
+
+    }
+
+    if stopped_early {
+        let settle_deadline = Instant::now() + settle_after_stop;
+        while Instant::now() < settle_deadline {
+            match rx.recv_timeout(Duration::from_millis(50)) {
+                Ok(chunk) => buffer.extend_from_slice(&chunk),
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+    }
+
+    let _ = writer.write_all(b"/exit\r");
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = reader_thread.join();
+
+    if buffer.is_empty() {
+        return Err("Claude CLI session timed out.".to_string());
+    }
+
+    if claude_cli_debug_enabled() {
+        dump_claude_cli_debug(binary, extra_args, &working_dir, &buffer, &stop_reason);
+    }
+
+    String::from_utf8(buffer).map_err(|error| {
+        format!("Claude CLI output was not valid UTF-8: {error}")
+    })
+}
+
+fn is_cli_unknown_option_allowed_tools(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    let mentions_unknown = lower.contains("unknown option")
+        || lower.contains("unrecognized option")
+        || lower.contains("unknown flag")
+        || lower.contains("unrecognized flag");
+    let mentions_allowed_tools =
+        lower.contains("--allowed-tools") || lower.contains("--allowed tools");
+    mentions_unknown && mentions_allowed_tools
+}
+
+fn claude_cli_debug_enabled() -> bool {
+    match std::env::var("AGENT_STATS_CLAUDE_PTY_DEBUG") {
+        Ok(value) => {
+            let trimmed = value.trim();
+            !trimmed.is_empty() && trimmed != "0"
+        }
+        Err(_) => false,
+    }
+}
+
+fn dump_claude_cli_debug(
+    binary: &str,
+    extra_args: &[&str],
+    working_dir: &std::path::Path,
+    output: &[u8],
+    stop_reason: &ClaudePtyStopReason,
+) {
+    let Some(path) = claude_cli_debug_path() else {
+        return;
+    };
+
+    let timestamp = OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_else(|_| OffsetDateTime::now_utc().to_string());
+    let reason = format_stop_reason(stop_reason);
+    let content = String::from_utf8_lossy(output);
+    let log_body = format!(
+        "timestamp={timestamp}\nreason={reason}\nbinary={binary}\nargs={:?}\ncwd={}\nraw_output:\n{}\n",
+        extra_args,
+        working_dir.display(),
+        content
+    );
+
+    if let Err(error) = std::fs::write(&path, log_body) {
+        log::error!("Failed to write Claude CLI debug output: {error}");
+    } else {
+        log::debug!("Claude CLI debug output written to {}", path.display());
+    }
+}
+
+fn format_stop_reason(reason: &ClaudePtyStopReason) -> String {
+    match reason {
+        ClaudePtyStopReason::Timeout => "Timeout".to_string(),
+        ClaudePtyStopReason::StopNeedle(needle) => format!("StopNeedle({needle})"),
+        ClaudePtyStopReason::ProcessExit => "ProcessExit".to_string(),
+        ClaudePtyStopReason::ChannelClosed => "ChannelClosed".to_string(),
+    }
+}
+
+fn claude_cli_debug_path() -> Option<std::path::PathBuf> {
+    let base = dirs::home_dir().unwrap_or_else(|| std::env::temp_dir());
+    let dir = base.join(".agent-stats");
+    if let Err(error) = std::fs::create_dir_all(&dir) {
+        log::error!("Failed to create Claude CLI debug directory: {error}");
+        return None;
+    }
+    Some(dir.join("claude-cli-debug.txt"))
+}
+
+fn build_claude_cli_environment(working_dir: &std::path::Path) -> Vec<(String, String)> {
+    let mut env: std::collections::HashMap<String, String> = std::env::vars().collect();
+    env.remove("CODEXBAR_CLAUDE_OAUTH_TOKEN");
+    env.remove("CODEXBAR_CLAUDE_OAUTH_SCOPES");
+    let keys: Vec<String> = env.keys().cloned().collect();
+    for key in keys {
+        if key.starts_with("ANTHROPIC_") {
+            env.remove(&key);
+        }
+    }
+    if let Some(path) = resolve_login_shell_path() {
+        env.insert("PATH".to_string(), path);
+    }
+    env.insert(
+        "PWD".to_string(),
+        working_dir.to_string_lossy().to_string(),
+    );
+    env.into_iter().collect()
+}
+
+fn claude_probe_working_directory() -> std::path::PathBuf {
+    let base = dirs::data_local_dir()
+        .or_else(|| dirs::home_dir())
+        .unwrap_or_else(|| std::env::temp_dir());
+    let probe_dir = base.join("AgentStats").join("ClaudeProbe");
+    if std::fs::create_dir_all(&probe_dir).is_ok() {
+        probe_dir
+    } else {
+        std::env::temp_dir()
+    }
+}
+
+struct RollingBuffer {
+    max_len: usize,
+    tail: Vec<u8>,
+}
+
+impl RollingBuffer {
+    fn new(max_len: usize) -> Self {
+        Self {
+            max_len: max_len.max(1),
+            tail: Vec::new(),
+        }
+    }
+
+    fn append(&mut self, data: &[u8]) -> Vec<u8> {
+        if data.is_empty() {
+            return Vec::new();
+        }
+        let mut combined = Vec::with_capacity(self.tail.len() + data.len());
+        combined.extend_from_slice(&self.tail);
+        combined.extend_from_slice(data);
+        if self.max_len > 1 {
+            if combined.len() >= self.max_len - 1 {
+                self.tail = combined[combined.len() - (self.max_len - 1)..].to_vec();
+            } else {
+                self.tail = combined.clone();
+            }
+        } else {
+            self.tail.clear();
+        }
+        combined
+    }
+}
+
+fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() {
+        return false;
+    }
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
+}
+
+fn format_cli_environment_diagnostics(login_shell_path: Option<&str>) -> String {
+    let current_path = std::env::var("PATH").ok();
+    let configured_binary = std::env::var("CLAUDE_BINARY").ok();
+    let mut parts = Vec::new();
+    parts.push(format!(
+        "PATH={}",
+        current_path.as_deref().unwrap_or("<unset>")
+    ));
+    parts.push(format!(
+        "CLAUDE_BINARY={}",
+        configured_binary.as_deref().unwrap_or("<unset>")
+    ));
+    if let Some(path) = login_shell_path {
+        parts.push(format!("login_shell_PATH={path}"));
+    } else {
+        parts.push("login_shell_PATH=<unavailable>".to_string());
+    }
+    format!(" ({})", parts.join(", "))
 }
 
 fn detect_cli_error(text: &str) -> Option<String> {
@@ -1078,6 +1573,10 @@ fn parse_cli_usage(text: &str) -> Result<UsageSnapshot, ProviderErrorPayload> {
         };
 
     let session_percent = session_percent.ok_or_else(|| {
+        log::debug!(
+            "Claude CLI parse missing 'Current session' label. Output snippet: {}",
+            truncate_body(text, 800)
+        );
         provider_error(
             "Could not parse Claude CLI usage: missing 'Current session' data. \
              The CLI output format may have changed.",
@@ -1594,6 +2093,22 @@ mod tests {
     }
 
     #[test]
+    fn test_is_cli_unknown_option_allowed_tools() {
+        assert!(is_cli_unknown_option_allowed_tools(
+            "error: unknown option '--allowed-tools'"
+        ));
+        assert!(is_cli_unknown_option_allowed_tools(
+            "Error: unrecognized option '--allowed tools'"
+        ));
+        assert!(!is_cli_unknown_option_allowed_tools(
+            "error: unknown option '--no-input'"
+        ));
+        assert!(!is_cli_unknown_option_allowed_tools(
+            "claude exited with status 1"
+        ));
+    }
+
+    #[test]
     fn test_detect_cli_error() {
         assert!(detect_cli_error("Your token_expired, please login again").is_some());
         assert!(detect_cli_error("authentication_error occurred").is_some());
@@ -1727,6 +2242,44 @@ Org: My Team
         let identity = snapshot.identity.as_ref().unwrap();
         assert_eq!(identity.account_email.as_deref(), Some("user@example.com"));
         assert_eq!(identity.account_organization.as_deref(), Some("My Team"));
+    }
+
+    #[test]
+    fn test_parse_cli_usage_current_format() {
+        let text = "\
+▐▛███▜▌   Claude Code v2.1.20
+▝▜█████▛▘  Opus 4.5 · Claude Max
+  ▘▘ ▝▝    ~/Projects/agent-limits
+
+❯ /usage
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Settings:  Status   Config   Usage  (←/→ or tab to cycle)
+
+
+  Current session
+  ██████████                                         20% used
+  Resets 8:59pm (America/Los_Angeles)
+
+  Current week (all models)
+  ███████████                                        22% used
+  Resets 4:59am (America/Los_Angeles)
+
+  Current week (Sonnet only)
+  █▌                                                 3% used
+  Resets Feb 2 at 11:59am (America/Los_Angeles)
+
+  Esc to cancel
+";
+        let result = parse_cli_usage(text);
+        assert!(result.is_ok());
+        let snapshot = result.unwrap();
+        let primary = snapshot.primary.as_ref().unwrap();
+        assert!((primary.used_percent - 20.0).abs() < 0.01);
+        let secondary = snapshot.secondary.as_ref().unwrap();
+        assert!((secondary.used_percent - 22.0).abs() < 0.01);
+        let tertiary = snapshot.tertiary.as_ref().unwrap();
+        assert!((tertiary.used_percent - 3.0).abs() < 0.01);
     }
 
     #[test]

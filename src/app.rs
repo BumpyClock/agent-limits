@@ -1,19 +1,28 @@
 use agent_stats_core::backend::{FetchRequest, fetch_native_usage, fetch_usage};
-use agent_stats_core::config::{AppConfig, ProviderConfig};
-use agent_stats_core::models::{ProviderPayload, ProviderStatusIndicator, RateWindow, UsageSnapshot};
+use agent_stats_core::config::{
+    AppConfig, ProviderConfig, ProviderCookieSource, ProviderSourceMode, TokenAccountData,
+    TokenAccountEntry,
+};
+use agent_stats_core::models::{
+    ProviderIdentitySnapshot, ProviderPayload, ProviderStatusIndicator, RateWindow, UsageSnapshot,
+};
 use agent_stats_core::provider_metadata::{ProviderId, ProviderMetadata, provider_metadata};
+use agent_stats_core::token_accounts::{TokenAccountSupport, token_account_support};
 use gpui::{
-    App, Application, AsyncApp, Context, Render, Task, WeakEntity, Window, WindowOptions, div, px,
-    prelude::*, point,
+    App, Application, AsyncApp, Context, Entity, Render, Task, WeakEntity, Window, WindowBounds,
+    WindowOptions, div, px, size, prelude::*,
 };
 use gpui_component::button::Button;
 use gpui_component::checkbox::Checkbox;
+use gpui_component::input::{Input, InputState};
 use gpui_component::label::Label;
 use gpui_component::progress::Progress;
+use gpui_component::scroll::ScrollableElement as _;
 use gpui_component::{Disableable, Selectable, StyledExt};
 use gpui_component::Root;
 use std::collections::HashMap;
 use time::{Duration, OffsetDateTime};
+use uuid::Uuid;
 
 use crate::settings::{AppSettings, RefreshCadence};
 
@@ -31,15 +40,13 @@ pub fn run() {
 
 fn create_main_window(cx: &mut App) {
     let window_options = WindowOptions {
-        titlebar: Some(gpui::TitlebarOptions {
-            title: Some("Agent Stats".into()),
-            appears_transparent: true,
-            traffic_light_position: Some(point(px(16.0), px(16.0))),
-        }),
+        window_bounds: Some(WindowBounds::centered(size(px(840.0), px(720.0)), cx)),
         ..Default::default()
     };
 
     let _ = cx.open_window(window_options, |window, cx| {
+        window.activate_window();
+        window.set_window_title("Agent Stats");
         let app = cx.new(|cx| AgentStatsApp::new(window, cx));
         cx.new(|cx| Root::new(app, window, cx))
     });
@@ -52,10 +59,42 @@ struct ProviderState {
     payload: Option<ProviderPayload>,
 }
 
+#[derive(Clone)]
+struct ProviderSettingsForm {
+    source_mode: ProviderSourceMode,
+    cookie_header: Entity<InputState>,
+    api_key: Entity<InputState>,
+    region: Entity<InputState>,
+    workspace_id: Entity<InputState>,
+}
+
+#[derive(Clone)]
+struct TokenAccountForm {
+    label: Entity<InputState>,
+    token: Entity<InputState>,
+}
+
+#[derive(Clone, Copy)]
+struct ProviderSettingsSpec {
+    source_modes: &'static [ProviderSourceMode],
+    show_cookie_header: bool,
+    show_api_key: bool,
+    show_region: bool,
+    show_workspace_id: bool,
+}
+
+#[derive(Clone, Copy)]
+enum ProviderMoveDirection {
+    Up,
+    Down,
+}
+
 pub struct AgentStatsApp {
     providers: Vec<ProviderState>,
     config: AppConfig,
     settings: AppSettings,
+    provider_forms: HashMap<ProviderId, ProviderSettingsForm>,
+    token_account_forms: HashMap<ProviderId, TokenAccountForm>,
     last_refresh: Option<OffsetDateTime>,
     refreshing: bool,
     error: Option<String>,
@@ -64,18 +103,22 @@ pub struct AgentStatsApp {
 }
 
 impl AgentStatsApp {
-    pub fn new(_window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let settings = AppSettings::load();
         let config = AppConfig::load_or_default().unwrap_or_else(|error| {
             log::error!("Failed to load config: {error}");
             AppConfig::default_config()
         });
         let providers = build_provider_states(&config);
+        let provider_forms = build_provider_forms(&config, window, cx);
+        let token_account_forms = build_token_account_forms(&config, window, cx);
 
         let mut app = Self {
             providers,
             config,
             settings,
+            provider_forms,
+            token_account_forms,
             last_refresh: None,
             refreshing: false,
             error: None,
@@ -207,6 +250,260 @@ impl AgentStatsApp {
             provider.enabled = Some(enabled);
         }
 
+        self.persist_config_and_refresh(cx);
+    }
+
+    fn update_provider_source_mode(
+        &mut self,
+        provider_id: ProviderId,
+        mode: ProviderSourceMode,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(form) = self.provider_forms.get_mut(&provider_id) {
+            form.source_mode = mode.clone();
+        }
+
+        if let Some(provider) = self
+            .config
+            .providers
+            .iter_mut()
+            .find(|provider| provider.id == provider_id)
+        {
+            provider.source = if mode == ProviderSourceMode::Auto {
+                None
+            } else {
+                Some(mode)
+            };
+        }
+
+        self.persist_config_and_refresh(cx);
+    }
+
+    fn save_provider_settings(&mut self, provider_id: ProviderId, cx: &mut Context<Self>) {
+        let Some(form) = self.provider_forms.get(&provider_id) else {
+            return;
+        };
+
+        let api_key_value = form.api_key.read(cx).value();
+        let api_key_text = api_key_value.trim();
+        let api_key = if api_key_text.is_empty() {
+            None
+        } else {
+            Some(api_key_text.to_string())
+        };
+
+        let cookie_value = form.cookie_header.read(cx).value();
+        let cookie_text = cookie_value.trim();
+        let cookie_header = if cookie_text.is_empty() {
+            None
+        } else {
+            Some(cookie_text.to_string())
+        };
+
+        let region_value = form.region.read(cx).value();
+        let region_text = region_value.trim();
+        let region = if region_text.is_empty() {
+            None
+        } else {
+            Some(region_text.to_string())
+        };
+
+        let workspace_value = form.workspace_id.read(cx).value();
+        let workspace_text = workspace_value.trim();
+        let workspace_id = if workspace_text.is_empty() {
+            None
+        } else {
+            Some(workspace_text.to_string())
+        };
+
+        if let Some(provider) = self
+            .config
+            .providers
+            .iter_mut()
+            .find(|provider| provider.id == provider_id)
+        {
+            provider.api_key = api_key;
+            provider.cookie_header = cookie_header.clone();
+            provider.region = region;
+            provider.workspace_id = workspace_id;
+            provider.cookie_source = if cookie_header.is_some() {
+                Some(ProviderCookieSource::Manual)
+            } else {
+                None
+            };
+            provider.source = if form.source_mode == ProviderSourceMode::Auto {
+                None
+            } else {
+                Some(form.source_mode.clone())
+            };
+        }
+
+        self.persist_config_and_refresh(cx);
+    }
+
+    fn add_token_account(
+        &mut self,
+        provider_id: ProviderId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (label_state, token_state, label_value, token_value) = {
+            let Some(form) = self.token_account_forms.get(&provider_id) else {
+                return;
+            };
+            (
+                form.label.clone(),
+                form.token.clone(),
+                form.label.read(cx).value(),
+                form.token.read(cx).value(),
+            )
+        };
+        let label_text = label_value.trim();
+        let token_text = token_value.trim();
+
+        if token_text.is_empty() {
+            return;
+        }
+
+        {
+            let Some(provider) = self
+                .config
+                .providers
+                .iter_mut()
+                .find(|provider| provider.id == provider_id)
+            else {
+                return;
+            };
+
+            let token_accounts = provider.token_accounts.get_or_insert_with(|| TokenAccountData {
+                version: 1,
+                active_index: 0,
+                accounts: Vec::new(),
+            });
+
+            let account_index = token_accounts.accounts.len() + 1;
+            let label = if label_text.is_empty() {
+                format!("Account {}", account_index)
+            } else {
+                label_text.to_string()
+            };
+
+            token_accounts.accounts.push(TokenAccountEntry {
+                id: Uuid::new_v4().to_string(),
+                label,
+                token: token_text.to_string(),
+                added_at: OffsetDateTime::now_utc().unix_timestamp(),
+                last_used: None,
+            });
+
+            token_accounts.active_index = token_accounts.accounts.len().saturating_sub(1);
+        }
+
+        self.persist_config_and_refresh(cx);
+        label_state.update(cx, |state, cx| {
+            state.set_value("", window, cx);
+        });
+        token_state.update(cx, |state, cx| {
+            state.set_value("", window, cx);
+        });
+    }
+
+    fn remove_selected_token_account(
+        &mut self,
+        provider_id: ProviderId,
+        cx: &mut Context<Self>,
+    ) {
+        let mut should_clear = false;
+        let mut should_clamp = false;
+        {
+            let Some(provider) = self
+                .config
+                .providers
+                .iter_mut()
+                .find(|provider| provider.id == provider_id)
+            else {
+                return;
+            };
+
+            let Some(token_accounts) = provider.token_accounts.as_mut() else {
+                return;
+            };
+
+            if token_accounts.accounts.is_empty() {
+                return;
+            }
+
+            let selected_index = token_accounts
+                .active_index
+                .min(token_accounts.accounts.len().saturating_sub(1));
+            token_accounts.accounts.remove(selected_index);
+
+            if token_accounts.accounts.is_empty() {
+                should_clear = true;
+            } else if token_accounts.active_index >= token_accounts.accounts.len() {
+                should_clamp = true;
+            }
+
+        }
+
+        if should_clear {
+            if let Some(provider) = self
+                .config
+                .providers
+                .iter_mut()
+                .find(|provider| provider.id == provider_id)
+            {
+                provider.token_accounts = None;
+            }
+        } else if should_clamp {
+            if let Some(provider) = self
+                .config
+                .providers
+                .iter_mut()
+                .find(|provider| provider.id == provider_id)
+            {
+                if let Some(token_accounts) = provider.token_accounts.as_mut() {
+                    token_accounts.active_index =
+                        token_accounts.accounts.len().saturating_sub(1);
+                }
+            }
+        }
+
+        self.persist_config_and_refresh(cx);
+    }
+
+    fn set_active_token_account(
+        &mut self,
+        provider_id: ProviderId,
+        index: usize,
+        cx: &mut Context<Self>,
+    ) {
+        {
+            let Some(provider) = self
+                .config
+                .providers
+                .iter_mut()
+                .find(|provider| provider.id == provider_id)
+            else {
+                return;
+            };
+
+            let Some(token_accounts) = provider.token_accounts.as_mut() else {
+                return;
+            };
+
+            if token_accounts.accounts.is_empty() {
+                return;
+            }
+
+            let max_index = token_accounts.accounts.len().saturating_sub(1);
+            token_accounts.active_index = index.min(max_index);
+        }
+
+        self.persist_config_and_refresh(cx);
+    }
+
+    fn persist_config_and_refresh(&mut self, cx: &mut Context<Self>) {
         if let Err(error) = self.config.save() {
             log::error!("Failed to save config: {error}");
         } else {
@@ -215,6 +512,47 @@ impl AgentStatsApp {
         }
         cx.notify();
     }
+
+    fn move_provider(
+        &mut self,
+        provider_id: ProviderId,
+        direction: ProviderMoveDirection,
+        cx: &mut Context<Self>,
+    ) {
+        if move_provider_in_config(&mut self.config, provider_id, direction) {
+            self.persist_config_and_refresh(cx);
+        }
+    }
+}
+
+fn move_provider_in_config(
+    config: &mut AppConfig,
+    provider_id: ProviderId,
+    direction: ProviderMoveDirection,
+) -> bool {
+    let current_index = config
+        .providers
+        .iter()
+        .position(|provider| provider.id == provider_id);
+    let Some(current_index) = current_index else {
+        return false;
+    };
+
+    let target_index = match direction {
+        ProviderMoveDirection::Up => current_index.saturating_sub(1),
+        ProviderMoveDirection::Down => current_index.saturating_add(1),
+    };
+
+    if current_index == target_index {
+        return false;
+    }
+
+    if target_index >= config.providers.len() {
+        return false;
+    }
+
+    config.providers.swap(current_index, target_index);
+    true
 }
 
 impl Render for AgentStatsApp {
@@ -278,6 +616,7 @@ impl Render for AgentStatsApp {
                 .flex_col()
                 .gap(px(12.0))
                 .paddings(px(16.0))
+                .overflow_y_scrollbar()
                 .child(header)
                 .when_some(error_banner, |this, banner| this.child(banner))
                 .child(provider_list)
@@ -359,23 +698,62 @@ fn render_settings(app: &mut AgentStatsApp, cx: &mut Context<AgentStatsApp>) -> 
                 })),
         );
 
+    let provider_count = app.providers.len();
     let provider_toggles = div()
         .flex()
         .flex_col()
         .gap(px(8.0))
-        .children(app.providers.iter().map(|provider| {
+        .children(app.providers.iter().enumerate().map(|(index, provider)| {
             let enabled = provider
                 .config
                 .enabled
                 .unwrap_or(provider.metadata.default_enabled);
             let provider_id = provider.config.id;
-            Checkbox::new(format!("provider-{}", provider_id))
+            let is_first = index == 0;
+            let is_last = index.saturating_add(1) >= provider_count;
+
+            let toggle = Checkbox::new(format!("provider-{}", provider_id))
                 .label(provider.metadata.display_name)
                 .checked(enabled)
                 .on_click(cx.listener(move |app, checked, _window, cx| {
                     app.update_provider_enabled(provider_id, *checked, cx);
-                }))
+                }));
+
+            let move_up = Button::new(format!("provider-{}-up", provider_id))
+                .label("Up")
+                .disabled(is_first)
+                .on_click(cx.listener(move |app, _event, _window, cx| {
+                    app.move_provider(provider_id, ProviderMoveDirection::Up, cx);
+                }));
+
+            let move_down = Button::new(format!("provider-{}-down", provider_id))
+                .label("Down")
+                .disabled(is_last)
+                .on_click(cx.listener(move |app, _event, _window, cx| {
+                    app.move_provider(provider_id, ProviderMoveDirection::Down, cx);
+                }));
+
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .child(toggle)
+                .child(move_up)
+                .child(move_down)
         }));
+
+    let provider_settings_cards: Vec<gpui::AnyElement> = app
+        .providers
+        .iter()
+        .filter_map(|provider| render_provider_settings_card(provider, app, cx))
+        .collect();
+
+    let has_provider_settings = !provider_settings_cards.is_empty();
+    let provider_settings = div()
+        .flex()
+        .flex_col()
+        .gap(px(12.0))
+        .children(provider_settings_cards);
 
     div()
         .size_full()
@@ -383,6 +761,7 @@ fn render_settings(app: &mut AgentStatsApp, cx: &mut Context<AgentStatsApp>) -> 
         .flex_col()
         .gap(px(16.0))
         .paddings(px(16.0))
+        .overflow_y_scrollbar()
         .child(settings_header)
         .child(div().child(Label::new("Refresh cadence")))
         .child(cadence_buttons)
@@ -390,6 +769,256 @@ fn render_settings(app: &mut AgentStatsApp, cx: &mut Context<AgentStatsApp>) -> 
         .child(toggles)
         .child(div().child(Label::new("Providers")))
         .child(provider_toggles)
+        .when(has_provider_settings, |this| {
+            this.child(div().child(Label::new("Provider settings")))
+                .child(provider_settings)
+        })
+        .into_any_element()
+}
+
+fn render_provider_settings_card(
+    provider: &ProviderState,
+    app: &AgentStatsApp,
+    cx: &mut Context<AgentStatsApp>,
+) -> Option<gpui::AnyElement> {
+    let spec = provider_settings_spec(provider.config.id);
+    if !spec.is_visible() {
+        return None;
+    }
+
+    let provider_id = provider.config.id;
+    let form = app.provider_forms.get(&provider_id)?;
+
+    let save_button = Button::new(format!("save-{}", provider_id))
+        .label("Save")
+        .on_click(cx.listener(move |app, _event, _window, cx| {
+            app.save_provider_settings(provider_id, cx);
+        }));
+
+    let header = div()
+        .flex()
+        .items_center()
+        .justify_between()
+        .child(Label::new(provider.metadata.display_name).text_sm())
+        .child(save_button);
+
+    let source_buttons = if spec.source_modes.is_empty() {
+        None
+    } else {
+        let buttons = div()
+            .flex()
+            .gap(px(6.0))
+            .children(spec.source_modes.iter().map(|mode| {
+                let selected = form.source_mode == *mode;
+                let mode_label = source_mode_label(mode);
+                let mode = mode.clone();
+                Button::new(format!("source-{}-{}", provider_id, mode.as_str()))
+                    .label(mode_label)
+                    .selected(selected)
+                    .on_click(cx.listener(move |app, _event, _window, cx| {
+                        app.update_provider_source_mode(provider_id, mode.clone(), cx);
+                    }))
+            }));
+
+        Some(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(4.0))
+                .child(Label::new("Source").text_sm())
+                .child(buttons)
+                .into_any_element(),
+        )
+    };
+
+    let cookie_header_input = if spec.show_cookie_header {
+        Some(render_settings_input(
+            "Cookie header",
+            Input::new(&form.cookie_header)
+                .mask_toggle()
+                .cleanable(true)
+                .flex_1(),
+        ))
+    } else {
+        None
+    };
+
+    let api_key_input = if spec.show_api_key {
+        Some(render_settings_input(
+            "API key",
+            Input::new(&form.api_key)
+                .mask_toggle()
+                .cleanable(true)
+                .flex_1(),
+        ))
+    } else {
+        None
+    };
+
+    let region_input = if spec.show_region {
+        Some(render_settings_input(
+            "Region",
+            Input::new(&form.region).cleanable(true).flex_1(),
+        ))
+    } else {
+        None
+    };
+
+    let workspace_input = if spec.show_workspace_id {
+        Some(render_settings_input(
+            "Workspace ID",
+            Input::new(&form.workspace_id).cleanable(true).flex_1(),
+        ))
+    } else {
+        None
+    };
+
+    let token_accounts = render_token_accounts_section(provider, app, cx);
+
+    Some(
+        div()
+            .rounded_lg()
+            .border_1()
+            .paddings(px(12.0))
+            .flex()
+            .flex_col()
+            .gap(px(10.0))
+            .child(header)
+            .when_some(source_buttons, |this, buttons| this.child(buttons))
+            .when_some(cookie_header_input, |this, input| this.child(input))
+            .when_some(api_key_input, |this, input| this.child(input))
+            .when_some(region_input, |this, input| this.child(input))
+            .when_some(workspace_input, |this, input| this.child(input))
+            .when_some(token_accounts, |this, section| this.child(section))
+            .into_any_element(),
+    )
+}
+
+fn render_token_accounts_section(
+    provider: &ProviderState,
+    app: &AgentStatsApp,
+    cx: &mut Context<AgentStatsApp>,
+) -> Option<gpui::AnyElement> {
+    let support = token_account_support(provider.config.id)?;
+    let form = app.token_account_forms.get(&provider.config.id)?;
+
+    let accounts = provider
+        .config
+        .token_accounts
+        .as_ref()
+        .map(|data| data.accounts.as_slice())
+        .unwrap_or(&[]);
+    let active_index = provider
+        .config
+        .token_accounts
+        .as_ref()
+        .map(|data| data.active_index)
+        .unwrap_or(0);
+    let active_index = if accounts.is_empty() {
+        0
+    } else {
+        active_index.min(accounts.len().saturating_sub(1))
+    };
+
+    let token_value = form.token.read(cx).value();
+    let can_add = !token_value.trim().is_empty();
+
+    let header = token_accounts_header(support);
+
+    let account_rows = if accounts.is_empty() {
+        div()
+            .child(Label::new("No token accounts yet.").text_sm())
+            .into_any_element()
+    } else {
+        let provider_id = provider.config.id;
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .children(accounts.iter().enumerate().map(|(index, account)| {
+                let selected = index == active_index;
+                let label = account.label.clone();
+                Button::new(format!("token-account-{}-{}", provider_id, index))
+                    .label(label)
+                    .selected(selected)
+                    .on_click(cx.listener(move |app, _event, _window, cx| {
+                        app.set_active_token_account(provider_id, index, cx);
+                    }))
+            }))
+            .into_any_element()
+    };
+
+    let provider_id = provider.config.id;
+    let add_button = Button::new(format!("token-add-{}", provider_id))
+        .label("Add account")
+        .disabled(!can_add)
+        .on_click(cx.listener(move |app, _event, window, cx| {
+            app.add_token_account(provider_id, window, cx);
+        }));
+
+    let remove_button = Button::new(format!("token-remove-{}", provider_id))
+        .label("Remove selected account")
+        .disabled(accounts.is_empty())
+        .on_click(cx.listener(move |app, _event, _window, cx| {
+            app.remove_selected_token_account(provider_id, cx);
+        }));
+
+    let inputs = div()
+        .flex()
+        .flex_col()
+        .gap(px(6.0))
+        .child(render_settings_input(
+            "Label",
+            Input::new(&form.label).cleanable(true).flex_1(),
+        ))
+        .child(render_settings_input(
+            "Token",
+            Input::new(&form.token)
+                .mask_toggle()
+                .cleanable(true)
+                .flex_1(),
+        ))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .child(add_button)
+                .child(remove_button),
+        );
+
+    Some(
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .child(header)
+            .child(account_rows)
+            .child(inputs)
+            .into_any_element(),
+    )
+}
+
+fn token_accounts_header(support: &TokenAccountSupport) -> gpui::AnyElement {
+    let subtitle = support.subtitle.trim();
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(4.0))
+        .child(Label::new(support.title).text_sm())
+        .when(!subtitle.is_empty(), |this| {
+            this.child(Label::new(subtitle).text_sm())
+        })
+        .into_any_element()
+}
+
+fn render_settings_input(label: &str, input: Input) -> gpui::AnyElement {
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(4.0))
+        .child(Label::new(label.to_string()).text_sm())
+        .child(input)
         .into_any_element()
 }
 
@@ -400,19 +1029,46 @@ fn render_provider_card(provider: &ProviderState, settings: &AppSettings) -> gpu
         .and_then(|payload| payload.status.as_ref())
         .map(|status| status.indicator.clone());
     let error = payload.and_then(|payload| payload.error.as_ref());
+    let has_snapshot = usage.is_some()
+        || payload
+            .and_then(|payload| payload.credits.as_ref())
+            .is_some();
+    let stale_badge = error.map(|_| {
+        let label = if has_snapshot {
+            "Stale"
+        } else {
+            "Last refresh failed"
+        };
+        div()
+            .rounded_sm()
+            .bg(gpui::rgba(0xFF5A5A26))
+            .paddings(px(4.0))
+            .child(Label::new(label).text_sm())
+    });
 
     let header = div()
         .flex()
         .items_center()
         .justify_between()
         .child(Label::new(provider.metadata.display_name).text_lg())
-        .child(render_status_indicator(status_indicator));
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .child(render_status_indicator(status_indicator))
+                .when_some(stale_badge, |this, badge| this.child(badge)),
+        );
 
     let usage_section = usage
         .map(|snapshot| render_usage(snapshot, settings))
         .unwrap_or_else(|| {
             div().child(Label::new("No usage data")).into_any_element()
         });
+
+    let identity_section = usage
+        .and_then(|snapshot| snapshot.identity.as_ref())
+        .and_then(render_identity_section);
 
     let credits = payload
         .and_then(|payload| payload.credits.as_ref())
@@ -436,10 +1092,57 @@ fn render_provider_card(provider: &ProviderState, settings: &AppSettings) -> gpu
         .flex_col()
         .gap(px(8.0))
         .child(header)
+        .when_some(identity_section, |this, section| this.child(section))
         .child(usage_section)
         .when_some(credits, |this, credits| this.child(credits))
         .when_some(error_row, |this, error| this.child(error))
         .into_any_element()
+}
+
+fn render_identity_section(identity: &ProviderIdentitySnapshot) -> Option<gpui::AnyElement> {
+    let mut lines: Vec<gpui::AnyElement> = Vec::new();
+
+    if let Some(email) = identity.account_email.as_ref() {
+        let email = email.trim();
+        if !email.is_empty() {
+            lines.push(Label::new(format!("Account: {email}")).text_sm().into_any_element());
+        }
+    }
+
+    if let Some(organization) = identity.account_organization.as_ref() {
+        let organization = organization.trim();
+        if !organization.is_empty() {
+            lines.push(
+                Label::new(format!("Organization: {organization}"))
+                    .text_sm()
+                    .into_any_element(),
+            );
+        }
+    }
+
+    if let Some(method) = identity.login_method.as_ref() {
+        let method = method.trim();
+        if !method.is_empty() {
+            lines.push(
+                Label::new(format!("Login: {method}"))
+                    .text_sm()
+                    .into_any_element(),
+            );
+        }
+    }
+
+    if lines.is_empty() {
+        return None;
+    }
+
+    Some(
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(4.0))
+            .children(lines)
+            .into_any_element(),
+    )
 }
 
 fn render_usage(snapshot: &UsageSnapshot, settings: &AppSettings) -> gpui::AnyElement {
@@ -525,6 +1228,276 @@ fn render_last_refresh(last_refresh: Option<OffsetDateTime>) -> gpui::AnyElement
     Label::new(text).into_any_element()
 }
 
+const SOURCE_MODES_NONE: &[ProviderSourceMode] = &[];
+const SOURCE_MODES_AUTO_WEB: &[ProviderSourceMode] =
+    &[ProviderSourceMode::Auto, ProviderSourceMode::Web];
+const SOURCE_MODES_AUTO_API: &[ProviderSourceMode] =
+    &[ProviderSourceMode::Auto, ProviderSourceMode::Api];
+const SOURCE_MODES_AUTO_API_OAUTH: &[ProviderSourceMode] = &[
+    ProviderSourceMode::Auto,
+    ProviderSourceMode::Api,
+    ProviderSourceMode::Oauth,
+];
+const SOURCE_MODES_AUTO_WEB_API: &[ProviderSourceMode] = &[
+    ProviderSourceMode::Auto,
+    ProviderSourceMode::Web,
+    ProviderSourceMode::Api,
+];
+const SOURCE_MODES_AUTO_CLI: &[ProviderSourceMode] =
+    &[ProviderSourceMode::Auto, ProviderSourceMode::Cli];
+const SOURCE_MODES_AUTO_OAUTH_CLI: &[ProviderSourceMode] = &[
+    ProviderSourceMode::Auto,
+    ProviderSourceMode::Oauth,
+    ProviderSourceMode::Cli,
+];
+const SOURCE_MODES_AUTO_OAUTH_WEB_CLI: &[ProviderSourceMode] = &[
+    ProviderSourceMode::Auto,
+    ProviderSourceMode::Oauth,
+    ProviderSourceMode::Web,
+    ProviderSourceMode::Cli,
+];
+
+impl ProviderSettingsSpec {
+    fn is_visible(&self) -> bool {
+        !self.source_modes.is_empty()
+            || self.show_cookie_header
+            || self.show_api_key
+            || self.show_region
+            || self.show_workspace_id
+    }
+}
+
+fn provider_settings_spec(provider_id: ProviderId) -> ProviderSettingsSpec {
+    match provider_id {
+        ProviderId::Codex => ProviderSettingsSpec {
+            source_modes: SOURCE_MODES_AUTO_OAUTH_CLI,
+            show_cookie_header: false,
+            show_api_key: false,
+            show_region: false,
+            show_workspace_id: false,
+        },
+        ProviderId::Claude => ProviderSettingsSpec {
+            source_modes: SOURCE_MODES_AUTO_OAUTH_WEB_CLI,
+            show_cookie_header: true,
+            show_api_key: false,
+            show_region: false,
+            show_workspace_id: false,
+        },
+        ProviderId::Cursor => ProviderSettingsSpec {
+            source_modes: SOURCE_MODES_AUTO_WEB,
+            show_cookie_header: true,
+            show_api_key: false,
+            show_region: false,
+            show_workspace_id: false,
+        },
+        ProviderId::OpenCode => ProviderSettingsSpec {
+            source_modes: SOURCE_MODES_AUTO_WEB,
+            show_cookie_header: true,
+            show_api_key: false,
+            show_region: false,
+            show_workspace_id: true,
+        },
+        ProviderId::Factory => ProviderSettingsSpec {
+            source_modes: SOURCE_MODES_AUTO_WEB,
+            show_cookie_header: true,
+            show_api_key: false,
+            show_region: false,
+            show_workspace_id: false,
+        },
+        ProviderId::Gemini => ProviderSettingsSpec {
+            source_modes: SOURCE_MODES_AUTO_API_OAUTH,
+            show_cookie_header: false,
+            show_api_key: false,
+            show_region: false,
+            show_workspace_id: false,
+        },
+        ProviderId::Antigravity => ProviderSettingsSpec {
+            source_modes: SOURCE_MODES_NONE,
+            show_cookie_header: false,
+            show_api_key: false,
+            show_region: false,
+            show_workspace_id: false,
+        },
+        ProviderId::Copilot => ProviderSettingsSpec {
+            source_modes: SOURCE_MODES_AUTO_API,
+            show_cookie_header: false,
+            show_api_key: true,
+            show_region: false,
+            show_workspace_id: false,
+        },
+        ProviderId::Zai => ProviderSettingsSpec {
+            source_modes: SOURCE_MODES_AUTO_API,
+            show_cookie_header: false,
+            show_api_key: true,
+            show_region: false,
+            show_workspace_id: false,
+        },
+        ProviderId::MiniMax => ProviderSettingsSpec {
+            source_modes: SOURCE_MODES_AUTO_WEB_API,
+            show_cookie_header: true,
+            show_api_key: true,
+            show_region: true,
+            show_workspace_id: true,
+        },
+        ProviderId::Kimi => ProviderSettingsSpec {
+            source_modes: SOURCE_MODES_AUTO_WEB_API,
+            show_cookie_header: true,
+            show_api_key: true,
+            show_region: false,
+            show_workspace_id: false,
+        },
+        ProviderId::Kiro => ProviderSettingsSpec {
+            source_modes: SOURCE_MODES_AUTO_CLI,
+            show_cookie_header: false,
+            show_api_key: false,
+            show_region: false,
+            show_workspace_id: false,
+        },
+        ProviderId::VertexAI => ProviderSettingsSpec {
+            source_modes: SOURCE_MODES_AUTO_API,
+            show_cookie_header: false,
+            show_api_key: false,
+            show_region: false,
+            show_workspace_id: false,
+        },
+        ProviderId::Augment => ProviderSettingsSpec {
+            source_modes: SOURCE_MODES_AUTO_WEB,
+            show_cookie_header: true,
+            show_api_key: false,
+            show_region: false,
+            show_workspace_id: false,
+        },
+        ProviderId::JetBrains => ProviderSettingsSpec {
+            source_modes: SOURCE_MODES_AUTO_WEB,
+            show_cookie_header: false,
+            show_api_key: false,
+            show_region: false,
+            show_workspace_id: false,
+        },
+        ProviderId::KimiK2 => ProviderSettingsSpec {
+            source_modes: SOURCE_MODES_AUTO_API,
+            show_cookie_header: false,
+            show_api_key: true,
+            show_region: false,
+            show_workspace_id: false,
+        },
+        ProviderId::Amp => ProviderSettingsSpec {
+            source_modes: SOURCE_MODES_AUTO_WEB,
+            show_cookie_header: true,
+            show_api_key: false,
+            show_region: false,
+            show_workspace_id: false,
+        },
+        ProviderId::Synthetic => ProviderSettingsSpec {
+            source_modes: SOURCE_MODES_AUTO_API,
+            show_cookie_header: false,
+            show_api_key: true,
+            show_region: false,
+            show_workspace_id: false,
+        },
+    }
+}
+
+fn source_mode_label(mode: &ProviderSourceMode) -> &'static str {
+    match mode {
+        ProviderSourceMode::Auto => "Auto",
+        ProviderSourceMode::Web => "Web",
+        ProviderSourceMode::Cli => "CLI",
+        ProviderSourceMode::Oauth => "OAuth",
+        ProviderSourceMode::Api => "API",
+    }
+}
+
+fn build_provider_forms(
+    config: &AppConfig,
+    window: &mut Window,
+    cx: &mut Context<AgentStatsApp>,
+) -> HashMap<ProviderId, ProviderSettingsForm> {
+    let mut forms = HashMap::new();
+    for provider in &config.providers {
+        let cookie_header = build_input_state(
+            window,
+            cx,
+            provider.cookie_header.as_deref(),
+            "Cookie header",
+            true,
+        );
+        let api_key = build_input_state(
+            window,
+            cx,
+            provider.api_key.as_deref(),
+            "API key",
+            true,
+        );
+        let region = build_input_state(
+            window,
+            cx,
+            provider.region.as_deref(),
+            "Region",
+            false,
+        );
+        let workspace_id = build_input_state(
+            window,
+            cx,
+            provider.workspace_id.as_deref(),
+            "Workspace ID",
+            false,
+        );
+        let source_mode = provider
+            .source
+            .clone()
+            .unwrap_or(ProviderSourceMode::Auto);
+
+        forms.insert(
+            provider.id,
+            ProviderSettingsForm {
+                source_mode,
+                cookie_header,
+                api_key,
+                region,
+                workspace_id,
+            },
+        );
+    }
+    forms
+}
+
+fn build_token_account_forms(
+    config: &AppConfig,
+    window: &mut Window,
+    cx: &mut Context<AgentStatsApp>,
+) -> HashMap<ProviderId, TokenAccountForm> {
+    let mut forms = HashMap::new();
+    for provider in &config.providers {
+        if let Some(support) = token_account_support(provider.id) {
+            let label = build_input_state(window, cx, None, "Account label", false);
+            let token = build_input_state(window, cx, None, support.placeholder, true);
+            forms.insert(provider.id, TokenAccountForm { label, token });
+        }
+    }
+    forms
+}
+
+fn build_input_state(
+    window: &mut Window,
+    cx: &mut Context<AgentStatsApp>,
+    value: Option<&str>,
+    placeholder: &'static str,
+    masked: bool,
+) -> Entity<InputState> {
+    let default_value: gpui::SharedString = value.unwrap_or("").to_string().into();
+    let placeholder: gpui::SharedString = placeholder.to_string().into();
+    cx.new(move |cx| {
+        let mut state = InputState::new(window, cx)
+            .placeholder(placeholder)
+            .default_value(default_value);
+        if masked {
+            state = state.masked(true);
+        }
+        state
+    })
+}
+
 fn build_provider_states(config: &AppConfig) -> Vec<ProviderState> {
     let metadata_map: HashMap<ProviderId, ProviderMetadata> = provider_metadata()
         .iter()
@@ -549,8 +1522,26 @@ fn format_reset(
     show_absolute: bool,
     reset_description: Option<&str>,
 ) -> String {
+    format_reset_with_now(resets_at, show_absolute, reset_description, OffsetDateTime::now_utc())
+}
+
+fn format_reset_with_now(
+    resets_at: Option<OffsetDateTime>,
+    show_absolute: bool,
+    reset_description: Option<&str>,
+    now: OffsetDateTime,
+) -> String {
     if let Some(description) = reset_description {
-        return format!("Resets {description}");
+        let trimmed = description.trim();
+        if trimmed.is_empty() {
+            return "Reset time unavailable".to_string();
+        }
+
+        if trimmed.to_lowercase().starts_with("resets") {
+            return trimmed.to_string();
+        }
+
+        return format!("Resets {trimmed}");
     }
 
     let Some(resets_at) = resets_at else {
@@ -567,7 +1558,6 @@ fn format_reset(
         }
     }
 
-    let now = OffsetDateTime::now_utc();
     let diff = resets_at - now;
     if diff.is_negative() {
         return "Resetting soon".to_string();
@@ -579,5 +1569,138 @@ fn format_reset(
         format!("Resets in {hours}h {minutes}m")
     } else {
         format!("Resets in {minutes}m")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ProviderId, ProviderMoveDirection, format_reset_with_now, move_provider_in_config};
+    use agent_stats_core::config::{AppConfig, ProviderConfig};
+    use time::{Duration, OffsetDateTime};
+
+    fn fixed_time() -> OffsetDateTime {
+        OffsetDateTime::from_unix_timestamp(1_700_000_000)
+            .unwrap_or_else(|_| OffsetDateTime::now_utc())
+    }
+
+    fn config_with_providers(ids: &[ProviderId]) -> AppConfig {
+        let providers = ids
+            .iter()
+            .map(|provider_id| ProviderConfig {
+                id: *provider_id,
+                enabled: None,
+                source: None,
+                cookie_source: None,
+                cookie_header: None,
+                api_key: None,
+                region: None,
+                workspace_id: None,
+                token_accounts: None,
+            })
+            .collect();
+
+        AppConfig { version: 1, providers }
+    }
+
+    fn provider_ids(config: &AppConfig) -> Vec<ProviderId> {
+        config.providers.iter().map(|provider| provider.id).collect()
+    }
+
+    #[test]
+    fn format_reset_preserves_existing_prefix() {
+        let now = fixed_time();
+        let result = format_reset_with_now(None, false, Some("Resets tomorrow"), now);
+        assert_eq!(result, "Resets tomorrow");
+    }
+
+    #[test]
+    fn format_reset_adds_prefix_when_missing() {
+        let now = fixed_time();
+        let result = format_reset_with_now(None, false, Some("in 2h"), now);
+        assert_eq!(result, "Resets in 2h");
+    }
+
+    #[test]
+    fn format_reset_relative_when_no_description() {
+        let now = fixed_time();
+        let resets_at = now + Duration::hours(2) + Duration::minutes(5);
+        let result = format_reset_with_now(Some(resets_at), false, None, now);
+        assert_eq!(result, "Resets in 2h 5m");
+    }
+
+    #[test]
+    fn move_provider_up_within_bounds() {
+        let mut config = config_with_providers(&[
+            ProviderId::Codex,
+            ProviderId::Claude,
+            ProviderId::Cursor,
+        ]);
+
+        let moved = move_provider_in_config(
+            &mut config,
+            ProviderId::Cursor,
+            ProviderMoveDirection::Up,
+        );
+
+        assert!(moved);
+        assert_eq!(
+            provider_ids(&config),
+            vec![ProviderId::Codex, ProviderId::Cursor, ProviderId::Claude]
+        );
+    }
+
+    #[test]
+    fn move_provider_down_within_bounds() {
+        let mut config = config_with_providers(&[
+            ProviderId::Codex,
+            ProviderId::Claude,
+            ProviderId::Cursor,
+        ]);
+
+        let moved = move_provider_in_config(
+            &mut config,
+            ProviderId::Codex,
+            ProviderMoveDirection::Down,
+        );
+
+        assert!(moved);
+        assert_eq!(
+            provider_ids(&config),
+            vec![ProviderId::Claude, ProviderId::Codex, ProviderId::Cursor]
+        );
+    }
+
+    #[test]
+    fn move_provider_up_at_start_is_noop() {
+        let mut config = config_with_providers(&[ProviderId::Codex, ProviderId::Claude]);
+
+        let moved = move_provider_in_config(
+            &mut config,
+            ProviderId::Codex,
+            ProviderMoveDirection::Up,
+        );
+
+        assert!(!moved);
+        assert_eq!(
+            provider_ids(&config),
+            vec![ProviderId::Codex, ProviderId::Claude]
+        );
+    }
+
+    #[test]
+    fn move_provider_down_at_end_is_noop() {
+        let mut config = config_with_providers(&[ProviderId::Codex, ProviderId::Claude]);
+
+        let moved = move_provider_in_config(
+            &mut config,
+            ProviderId::Claude,
+            ProviderMoveDirection::Down,
+        );
+
+        assert!(!moved);
+        assert_eq!(
+            provider_ids(&config),
+            vec![ProviderId::Codex, ProviderId::Claude]
+        );
     }
 }

@@ -1,7 +1,11 @@
-use crate::config::{AppConfig, ProviderSourceMode};
+use crate::config::{AppConfig, ProviderCookieSource, ProviderSourceMode};
 use crate::models::ProviderPayload;
 use crate::provider_metadata::provider_metadata;
 use crate::providers::{ProviderFetchContext, registry};
+use crate::token_accounts::{
+    TokenAccountInjection, is_claude_oauth_token, normalized_claude_oauth_token,
+    normalized_cookie_header, token_account_support,
+};
 use anyhow::{Context, Result};
 use serde_json::Value;
 use std::process::Command;
@@ -131,12 +135,50 @@ pub fn fetch_native_usage(request: FetchRequest) -> Result<FetchResult> {
         }
 
         let provider = registry.provider(provider_config.id);
+        let mut effective_config = provider_config.clone();
+        let mut oauth_token_override: Option<String> = None;
+
+        if let Some(token_accounts) = provider_config.token_accounts.as_ref() {
+            if !token_accounts.accounts.is_empty() {
+                if let Some(support) = token_account_support(provider_config.id) {
+                    let active_index = token_accounts
+                        .active_index
+                        .min(token_accounts.accounts.len().saturating_sub(1));
+                    if let Some(account) = token_accounts.accounts.get(active_index) {
+                        let token = account.token.trim();
+                        if !token.is_empty() {
+                            match support.injection {
+                                TokenAccountInjection::CookieHeader => {
+                                    if provider_config.id == crate::provider_metadata::ProviderId::Claude
+                                        && is_claude_oauth_token(token)
+                                    {
+                                        oauth_token_override = normalized_claude_oauth_token(token);
+                                    } else {
+                                        effective_config.cookie_header =
+                                            Some(normalized_cookie_header(token, support));
+                                        if support.requires_manual_cookie_source {
+                                            effective_config.cookie_source =
+                                                Some(ProviderCookieSource::Manual);
+                                        }
+                                    }
+                                }
+                                TokenAccountInjection::Environment { .. } => {
+                                    effective_config.api_key = Some(token.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         let context = ProviderFetchContext {
             provider_id: provider_config.id,
-            provider_config: provider_config.clone(),
+            provider_config: effective_config,
             source_override: source_override.clone(),
             include_status: request.include_status,
             now,
+            oauth_token_override,
         };
 
         match provider.fetch(&context) {
