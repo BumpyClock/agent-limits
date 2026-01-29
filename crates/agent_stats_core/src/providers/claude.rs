@@ -9,8 +9,9 @@ use crate::token_storage::{SecureTokenStorage, accounts};
 use super::{Provider, ProviderFetchContext};
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use serde::Deserialize;
+use std::collections::HashSet;
 use std::io::{Read, Write};
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{OnceLock, RwLock};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -1023,16 +1024,20 @@ fn fetch_via_cli() -> Result<(UsageSnapshot, &'static str), ProviderErrorPayload
         )
     })?;
 
-    let usage_output = run_claude_pty_usage(&claude_binary)
+    let usage_capture = run_claude_pty_usage(&claude_binary)
         .map_err(|error| provider_error(&format!("Claude CLI usage probe failed: {error}")))?;
 
-    let clean = strip_ansi_codes(&usage_output);
+    let clean = strip_ansi_codes(&usage_capture.usage_text);
+    let status_clean = usage_capture
+        .status_text
+        .as_ref()
+        .map(|text| strip_ansi_codes(text));
 
     if let Some(cli_error) = detect_cli_error(&clean) {
         return Err(provider_error(&cli_error));
     }
 
-    let snapshot = parse_cli_usage(&clean)?;
+    let snapshot = parse_cli_usage_with_status(&clean, status_clean.as_deref())?;
     Ok((snapshot, "cli"))
 }
 
@@ -1100,7 +1105,13 @@ fn run_login_shell_command(command: &str) -> Option<String> {
     }
 }
 
-fn run_claude_pty_usage(binary: &str) -> Result<String, String> {
+#[derive(Debug, Clone)]
+struct ClaudeCliCapture {
+    usage_text: String,
+    status_text: Option<String>,
+}
+
+fn run_claude_pty_usage(binary: &str) -> Result<ClaudeCliCapture, String> {
     let output = run_claude_pty_usage_with_args(binary, &["--allowed-tools", ""]);
     match output {
         Ok(value) => Ok(value),
@@ -1118,8 +1129,13 @@ fn run_claude_pty_usage(binary: &str) -> Result<String, String> {
 enum ClaudePtyStopReason {
     Timeout,
     StopNeedle(String),
-    ProcessExit,
     ChannelClosed,
+}
+
+#[derive(Debug, Clone)]
+enum ClaudePtySessionError {
+    LaunchFailed(String),
+    ProcessExited,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1128,246 +1144,367 @@ struct ClaudePtyPromptInfo {
     prompt_wait_ms: u128,
 }
 
-fn run_claude_pty_usage_with_args(binary: &str, extra_args: &[&str]) -> Result<String, String> {
-    let pty_system = native_pty_system();
-    let pty_pair = pty_system
-        .openpty(PtySize {
-            rows: 50,
-            cols: 160,
-            pixel_width: 0,
-            pixel_height: 0,
+struct ClaudePtyCapture {
+    output: Vec<u8>,
+    stop_reason: ClaudePtyStopReason,
+    prompt_info: ClaudePtyPromptInfo,
+}
+
+struct ClaudePtySession {
+    child: Box<dyn portable_pty::Child + Send>,
+    writer: Box<dyn Write + Send>,
+    receiver: mpsc::Receiver<Vec<u8>>,
+    reader_thread: Option<thread::JoinHandle<()>>,
+    started_at: Instant,
+}
+
+impl ClaudePtySession {
+    fn start(binary: &str, extra_args: &[&str]) -> Result<Self, ClaudePtySessionError> {
+        let pty_system = native_pty_system();
+        let pty_pair = pty_system
+            .openpty(PtySize {
+                rows: 50,
+                cols: 160,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .map_err(|error| ClaudePtySessionError::LaunchFailed(error.to_string()))?;
+
+        let working_dir = claude_probe_working_directory();
+        if claude_cli_debug_enabled() {
+            log::debug!(
+                "Claude PTY starting (binary={binary}, args={:?}, cwd={})",
+                extra_args,
+                working_dir.display()
+            );
+        }
+
+        let mut command = CommandBuilder::new(binary);
+        command.args(extra_args);
+        command.cwd(&working_dir);
+
+        for (key, value) in build_claude_cli_environment(&working_dir) {
+            command.env(key, value);
+        }
+
+        let child = pty_pair
+            .slave
+            .spawn_command(command)
+            .map_err(|error| ClaudePtySessionError::LaunchFailed(error.to_string()))?;
+        drop(pty_pair.slave);
+
+        let mut reader = pty_pair
+            .master
+            .try_clone_reader()
+            .map_err(|error| ClaudePtySessionError::LaunchFailed(error.to_string()))?;
+        let writer = pty_pair
+            .master
+            .take_writer()
+            .map_err(|error| ClaudePtySessionError::LaunchFailed(error.to_string()))?;
+
+        let (sender, receiver) = mpsc::channel::<Vec<u8>>();
+        let reader_thread = thread::spawn(move || {
+            let mut buffer = [0u8; 4096];
+            loop {
+                match reader.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(count) => {
+                        if sender.send(buffer[..count].to_vec()).is_err() {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        Ok(Self {
+            child,
+            writer,
+            receiver,
+            reader_thread: Some(reader_thread),
+            started_at: Instant::now(),
         })
-        .map_err(|error| format!("Failed to open Claude PTY: {error}"))?;
-
-    let working_dir = claude_probe_working_directory();
-    if claude_cli_debug_enabled() {
-        log::debug!(
-            "Claude PTY starting (binary={binary}, args={:?}, cwd={})",
-            extra_args,
-            working_dir.display()
-        );
-    }
-    let mut command = CommandBuilder::new(binary);
-    command.args(extra_args);
-    command.cwd(&working_dir);
-
-    for (key, value) in build_claude_cli_environment(&working_dir) {
-        command.env(key, value);
     }
 
-    let mut child = pty_pair
-        .slave
-        .spawn_command(command)
-        .map_err(|error| format!("Failed to launch Claude CLI session: {error}"))?;
-    drop(pty_pair.slave);
+    fn capture(
+        &mut self,
+        subcommand: &str,
+        timeout: Duration,
+        idle_timeout: Option<Duration>,
+        stop_on_substrings: &[&str],
+        settle_after_stop: Duration,
+        send_enter_every: Option<Duration>,
+        prompt_tracking: bool,
+        wait_for_prompt: Option<Duration>,
+    ) -> Result<ClaudePtyCapture, ClaudePtySessionError> {
+        let since_start = self.started_at.elapsed();
+        if since_start < Duration::from_millis(400) {
+            thread::sleep(Duration::from_millis(400) - since_start);
+        }
 
-    let mut reader = pty_pair
-        .master
-        .try_clone_reader()
-        .map_err(|error| format!("Failed to capture Claude CLI output: {error}"))?;
-    let mut writer = pty_pair
-        .master
-        .take_writer()
-        .map_err(|error| format!("Failed to send Claude CLI input: {error}"))?;
+        self.drain_output();
 
-    let (tx, rx) = mpsc::channel::<Vec<u8>>();
-    let reader_thread = thread::spawn(move || {
-        let mut buffer = [0u8; 4096];
-        loop {
-            match reader.read(&mut buffer) {
-                Ok(0) => break,
-                Ok(count) => {
-                    if tx.send(buffer[..count].to_vec()).is_err() {
+        let stop_needles: Vec<Vec<u8>> =
+            stop_on_substrings.iter().map(|item| item.as_bytes().to_vec()).collect();
+        let send_on_substrings = [
+            ("Do you trust the files in this folder?", "y\r"),
+            ("Ready to code here?", "\r"),
+            ("Press Enter to continue", "\r"),
+            ("Show plan usage limits", "\r"),
+            ("Show Claude Code status", "\r"),
+        ];
+        let send_needles: Vec<(Vec<u8>, Vec<u8>)> = send_on_substrings
+            .iter()
+            .map(|(needle, response)| (needle.as_bytes().to_vec(), response.as_bytes().to_vec()))
+            .collect();
+        let prompt_needles = [
+            "❯",
+            "Try \"",
+        ];
+        let prompt_needles: Vec<Vec<u8>> = prompt_needles
+            .iter()
+            .map(|needle| needle.as_bytes().to_vec())
+            .collect();
+
+        let cursor_query = [0x1B, 0x5B, 0x36, 0x6E];
+        let cursor_reply = [0x1B, 0x5B, 0x31, 0x3B, 0x31, 0x52];
+
+        let max_needle = stop_needles
+            .iter()
+            .map(|item| item.len())
+            .chain(send_needles.iter().map(|item| item.0.len()))
+            .chain(prompt_needles.iter().map(|item| item.len()))
+            .chain([cursor_query.len()])
+            .max()
+            .unwrap_or(1);
+        let mut rolling = RollingBuffer::new(max_needle);
+        let mut triggered_sends: HashSet<Vec<u8>> = HashSet::new();
+        let mut prompt_info = ClaudePtyPromptInfo {
+            prompt_seen: false,
+            prompt_wait_ms: 0,
+        };
+        let prompt_start = Instant::now();
+        let mut next_cursor_check = Instant::now();
+
+        if let Some(wait_duration) = wait_for_prompt {
+            let prompt_deadline = Instant::now() + wait_duration;
+            while Instant::now() < prompt_deadline {
+                match self.receiver.recv_timeout(Duration::from_millis(80)) {
+                    Ok(chunk) => {
+                        let scan_data = rolling.append(&chunk);
+                        if Instant::now() >= next_cursor_check
+                            && !scan_data.is_empty()
+                            && contains_bytes(&scan_data, &cursor_query)
+                        {
+                            let _ = self.writer.write_all(&cursor_reply);
+                            next_cursor_check = Instant::now() + Duration::from_secs(1);
+                        }
+                        for (needle, response) in &send_needles {
+                            if !triggered_sends.contains(needle) && contains_bytes(&scan_data, needle) {
+                                let _ = self.writer.write_all(response);
+                                triggered_sends.insert(needle.clone());
+                            }
+                        }
+                        if prompt_needles.iter().any(|needle| contains_bytes(&scan_data, needle)) {
+                            prompt_info.prompt_seen = true;
+                            prompt_info.prompt_wait_ms = prompt_start.elapsed().as_millis();
+                            break;
+                        }
+                    }
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(mpsc::RecvTimeoutError::Disconnected) => {
                         break;
                     }
                 }
-                Err(_) => break,
             }
+            self.drain_output();
+            rolling = RollingBuffer::new(max_needle);
         }
-    });
 
-    let boot_delay = Duration::from_millis(400);
-    thread::sleep(boot_delay);
-    while rx.try_recv().is_ok() {}
+        let trimmed = subcommand.trim();
+        if !trimmed.is_empty() {
+            self.send_text(trimmed)?;
+            self.send_text("\r")?;
+        }
 
-    let stop_needles = [
-        "Current session",
-        "Failed to load usage data",
-        "failed to load usage data",
-    ];
-    let send_on_substrings = [
-        ("Do you trust the files in this folder?", "y\r"),
-        ("Ready to code here?", "\r"),
-        ("Press Enter to continue", "\r"),
-        ("Show plan usage limits", "\r"),
-        ("Show Claude Code status", "\r"),
-    ];
+        let start = Instant::now();
+        let deadline = start + timeout;
+        let mut last_output_at = Instant::now();
+        let mut last_enter_at = Instant::now();
+        let mut stopped_early = false;
+        let mut stop_reason = ClaudePtyStopReason::Timeout;
+        let mut buffer: Vec<u8> = Vec::new();
 
-    let stop_needles: Vec<Vec<u8>> = stop_needles.iter().map(|item| item.as_bytes().to_vec()).collect();
-    let send_on_substrings: Vec<(Vec<u8>, Vec<u8>)> = send_on_substrings
-        .iter()
-        .map(|(needle, response)| (needle.as_bytes().to_vec(), response.as_bytes().to_vec()))
-        .collect();
-    let max_needle = stop_needles
-        .iter()
-        .map(|item| item.len())
-        .chain(send_on_substrings.iter().map(|item| item.0.len()))
-        .max()
-        .unwrap_or(1);
-
-    let timeout = Duration::from_secs(20);
-    let settle_after_stop = Duration::from_secs(2);
-    let send_enter_every = Duration::from_millis(800);
-    let cursor_query = [0x1B, 0x5B, 0x36, 0x6E];
-    let cursor_reply = [0x1B, 0x5B, 0x31, 0x3B, 0x31, 0x52];
-    let mut next_cursor_check = Instant::now();
-    let prompt_needles = [
-        "❯",
-        "Try \"",
-        "bypass permissions on",
-    ];
-    let prompt_needles: Vec<Vec<u8>> = prompt_needles
-        .iter()
-        .map(|needle| needle.as_bytes().to_vec())
-        .collect();
-
-    let start = Instant::now();
-    let mut last_enter = Instant::now();
-    let mut buffer: Vec<u8> = Vec::new();
-    let mut rolling = RollingBuffer::new(max_needle);
-    let mut triggered_send = vec![false; send_on_substrings.len()];
-    let mut stopped_early = false;
-    let mut stop_reason = ClaudePtyStopReason::Timeout;
-
-    let prompt_start = Instant::now();
-    let prompt_deadline = prompt_start + Duration::from_secs(6);
-    let mut prompt_seen = false;
-    let mut prompt_scan = RollingBuffer::new(
-        prompt_needles
-            .iter()
-            .map(|needle| needle.len())
-            .max()
-            .unwrap_or(1),
-    );
-    while Instant::now() < prompt_deadline {
-        match rx.recv_timeout(Duration::from_millis(80)) {
-            Ok(chunk) => {
-                let scan = prompt_scan.append(&chunk);
-                if Instant::now() >= next_cursor_check
-                    && !scan.is_empty()
-                    && contains_bytes(&scan, &cursor_query)
-                {
-                    let _ = writer.write_all(&cursor_reply);
-                    next_cursor_check = Instant::now() + Duration::from_secs(1);
-                }
-                for (index, (needle, response)) in send_on_substrings.iter().enumerate() {
-                    if !triggered_send[index] && contains_bytes(&scan, needle) {
-                        let _ = writer.write_all(response);
-                        triggered_send[index] = true;
+        while Instant::now() < deadline {
+            let mut new_data: Vec<u8> = Vec::new();
+            match self.receiver.recv_timeout(Duration::from_millis(60)) {
+                Ok(chunk) => {
+                    new_data.extend_from_slice(&chunk);
+                    while let Ok(chunk) = self.receiver.try_recv() {
+                        new_data.extend_from_slice(&chunk);
                     }
                 }
-                if prompt_needles.iter().any(|needle| contains_bytes(&scan, needle)) {
-                    prompt_seen = true;
-                    break;
-                }
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                break;
-            }
-        }
-    }
-
-    if claude_cli_debug_enabled() && !prompt_seen {
-        log::debug!("Claude PTY prompt not detected before sending /usage");
-    }
-
-    while rx.try_recv().is_ok() {}
-
-    writer
-        .write_all(b"/usage\r")
-        .map_err(|error| format!("Failed to send Claude CLI command: {error}"))?;
-    let prompt_wait_ms = prompt_start.elapsed().as_millis();
-
-
-    loop {
-        if start.elapsed() >= timeout {
-            break;
-        }
-
-        match rx.recv_timeout(Duration::from_millis(80)) {
-            Ok(chunk) => {
-                buffer.extend_from_slice(&chunk);
-                let scan = rolling.append(&chunk);
-                if Instant::now() >= next_cursor_check
-                    && !scan.is_empty()
-                    && contains_bytes(&scan, &cursor_query)
-                {
-                    let _ = writer.write_all(&cursor_reply);
-                    next_cursor_check = Instant::now() + Duration::from_secs(1);
-                }
-
-                for (index, (needle, response)) in send_on_substrings.iter().enumerate() {
-                    if !triggered_send[index] && contains_bytes(&scan, needle) {
-                        let _ = writer.write_all(response);
-                        triggered_send[index] = true;
-                    }
-                }
-                if let Some((index, _)) = stop_needles
-                    .iter()
-                    .enumerate()
-                    .find(|(_, needle)| contains_bytes(&scan, needle))
-                {
-                    stopped_early = true;
-                    stop_reason = ClaudePtyStopReason::StopNeedle(
-                        String::from_utf8_lossy(&stop_needles[index]).to_string(),
-                    );
-                    break;
-                }
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                stop_reason = ClaudePtyStopReason::ChannelClosed;
-                break;
-            }
-        }
-
-        if last_enter.elapsed() >= send_enter_every {
-            let _ = writer.write_all(b"\r");
-            last_enter = Instant::now();
-        }
-
-        match child.try_wait() {
-            Ok(Some(_)) => {
-                stop_reason = ClaudePtyStopReason::ProcessExit;
-                break;
-            }
-            Ok(None) => {}
-            Err(_) => {
-                stop_reason = ClaudePtyStopReason::ProcessExit;
-                break;
-            }
-        }
-
-    }
-
-    if stopped_early {
-        let settle_deadline = Instant::now() + settle_after_stop;
-        while Instant::now() < settle_deadline {
-            match rx.recv_timeout(Duration::from_millis(50)) {
-                Ok(chunk) => buffer.extend_from_slice(&chunk),
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    stop_reason = ClaudePtyStopReason::ChannelClosed;
+                    break;
+                }
+            }
+
+            if !new_data.is_empty() {
+                buffer.extend_from_slice(&new_data);
+                last_output_at = Instant::now();
+            }
+
+            let scan_data = rolling.append(&new_data);
+
+            if Instant::now() >= next_cursor_check
+                && !scan_data.is_empty()
+                && contains_bytes(&scan_data, &cursor_query)
+            {
+                let _ = self.writer.write_all(&cursor_reply);
+                next_cursor_check = Instant::now() + Duration::from_secs(1);
+            }
+
+            for (needle, response) in &send_needles {
+                if !triggered_sends.contains(needle) && contains_bytes(&scan_data, needle) {
+                    let _ = self.writer.write_all(response);
+                    triggered_sends.insert(needle.clone());
+                }
+            }
+
+            if prompt_tracking && !prompt_info.prompt_seen {
+                if prompt_needles.iter().any(|needle| contains_bytes(&scan_data, needle)) {
+                    prompt_info.prompt_seen = true;
+                    prompt_info.prompt_wait_ms = prompt_start.elapsed().as_millis();
+                }
+            }
+
+            if let Some((index, _)) = stop_needles
+                .iter()
+                .enumerate()
+                .find(|(_, needle)| contains_bytes(&scan_data, needle))
+            {
+                stopped_early = true;
+                stop_reason = ClaudePtyStopReason::StopNeedle(
+                    String::from_utf8_lossy(&stop_needles[index]).to_string(),
+                );
+                break;
+            }
+
+            if let Some(idle_limit) = idle_timeout {
+                if !buffer.is_empty() && last_output_at.elapsed() >= idle_limit {
+                    stopped_early = true;
+                    stop_reason = ClaudePtyStopReason::StopNeedle("IdleTimeout".to_string());
+                    break;
+                }
+            }
+
+            if let Some(every) = send_enter_every {
+                if last_enter_at.elapsed() >= every {
+                    let _ = self.writer.write_all(b"\r");
+                    last_enter_at = Instant::now();
+                }
+            }
+
+            match self.child.try_wait() {
+                Ok(Some(_)) => return Err(ClaudePtySessionError::ProcessExited),
+                Ok(None) => {}
+                Err(_) => return Err(ClaudePtySessionError::ProcessExited),
             }
         }
+
+        if stopped_early {
+            let settle_deadline = Instant::now() + settle_after_stop;
+            while Instant::now() < settle_deadline {
+                match self.receiver.recv_timeout(Duration::from_millis(50)) {
+                    Ok(chunk) => buffer.extend_from_slice(&chunk),
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(mpsc::RecvTimeoutError::Disconnected) => {
+                        stop_reason = ClaudePtyStopReason::ChannelClosed;
+                        break;
+                    }
+                }
+            }
+        }
+
+        Ok(ClaudePtyCapture {
+            output: buffer,
+            stop_reason,
+            prompt_info,
+        })
     }
 
-    let _ = writer.write_all(b"/exit\r");
-    let _ = child.kill();
-    let _ = child.wait();
-    let _ = reader_thread.join();
+    fn drain_output(&mut self) {
+        while self.receiver.try_recv().is_ok() {}
+    }
 
-    if buffer.is_empty() {
+    fn send_text(&mut self, text: &str) -> Result<(), ClaudePtySessionError> {
+        self.writer
+            .write_all(text.as_bytes())
+            .map_err(|_| ClaudePtySessionError::ProcessExited)
+    }
+
+    fn shutdown(mut self) {
+        let _ = self.writer.write_all(b"/exit\r");
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        if let Some(reader_thread) = self.reader_thread.take() {
+            let _ = reader_thread.join();
+        }
+    }
+}
+
+fn run_claude_pty_usage_with_args(
+    binary: &str,
+    extra_args: &[&str],
+) -> Result<ClaudeCliCapture, String> {
+    let working_dir = claude_probe_working_directory();
+    let mut session = ClaudePtySession::start(binary, extra_args)
+        .map_err(|error| match error {
+            ClaudePtySessionError::LaunchFailed(message) => {
+                format!("Failed to launch Claude CLI session: {message}")
+            }
+            ClaudePtySessionError::ProcessExited => "Claude CLI session exited.".to_string(),
+        })?;
+
+    let usage_capture = session.capture(
+        "/usage",
+        Duration::from_secs(20),
+        None,
+        &[
+            "Current session",
+            "Failed to load usage data",
+            "failed to load usage data",
+        ],
+        Duration::from_secs(2),
+        Some(Duration::from_millis(800)),
+        true,
+        Some(Duration::from_secs(6)),
+    );
+
+    let status_capture = session.capture(
+        "/status",
+        Duration::from_secs(12),
+        Some(Duration::from_secs(3)),
+        &[],
+        Duration::from_millis(250),
+        None,
+        false,
+        None,
+    );
+
+    session.shutdown();
+
+    let usage_capture = usage_capture.map_err(|error| match error {
+        ClaudePtySessionError::LaunchFailed(message) => {
+            format!("Failed to launch Claude CLI session: {message}")
+        }
+        ClaudePtySessionError::ProcessExited => "Claude CLI session exited.".to_string(),
+    })?;
+
+    if usage_capture.output.is_empty() {
         return Err("Claude CLI session timed out.".to_string());
     }
 
@@ -1376,17 +1513,23 @@ fn run_claude_pty_usage_with_args(binary: &str, extra_args: &[&str]) -> Result<S
             binary,
             extra_args,
             &working_dir,
-            &buffer,
-            &stop_reason,
-            ClaudePtyPromptInfo {
-                prompt_seen,
-                prompt_wait_ms,
-            },
+            &usage_capture.output,
+            &usage_capture.stop_reason,
+            usage_capture.prompt_info,
         );
     }
 
-    String::from_utf8(buffer).map_err(|error| {
-        format!("Claude CLI output was not valid UTF-8: {error}")
+    let usage_text = String::from_utf8(usage_capture.output)
+        .map_err(|_| "Claude CLI session timed out.".to_string())?;
+
+    let status_text = match status_capture {
+        Ok(capture) => String::from_utf8(capture.output).ok(),
+        Err(_) => None,
+    };
+
+    Ok(ClaudeCliCapture {
+        usage_text,
+        status_text,
     })
 }
 
@@ -1448,7 +1591,6 @@ fn format_stop_reason(reason: &ClaudePtyStopReason) -> String {
     match reason {
         ClaudePtyStopReason::Timeout => "Timeout".to_string(),
         ClaudePtyStopReason::StopNeedle(needle) => format!("StopNeedle({needle})"),
-        ClaudePtyStopReason::ProcessExit => "ProcessExit".to_string(),
         ClaudePtyStopReason::ChannelClosed => "ChannelClosed".to_string(),
     }
 }
@@ -1475,6 +1617,22 @@ fn build_claude_cli_environment(working_dir: &std::path::Path) -> Vec<(String, S
     }
     if let Some(path) = resolve_login_shell_path() {
         env.insert("PATH".to_string(), path);
+    }
+    let home_dir = dirs::home_dir().unwrap_or_else(|| std::env::temp_dir());
+    if env.get("HOME").map(|value| value.is_empty()).unwrap_or(true) {
+        env.insert("HOME".to_string(), home_dir.to_string_lossy().to_string());
+    }
+    if env.get("TERM").map(|value| value.is_empty()).unwrap_or(true) {
+        env.insert("TERM".to_string(), "xterm-256color".to_string());
+    }
+    if env.get("COLORTERM").map(|value| value.is_empty()).unwrap_or(true) {
+        env.insert("COLORTERM".to_string(), "truecolor".to_string());
+    }
+    if env.get("LANG").map(|value| value.is_empty()).unwrap_or(true) {
+        env.insert("LANG".to_string(), "en_US.UTF-8".to_string());
+    }
+    if !env.contains_key("CI") {
+        env.insert("CI".to_string(), "0".to_string());
     }
     env.insert(
         "PWD".to_string(),
@@ -1649,7 +1807,10 @@ fn find_matching_brace(text: &str) -> Option<usize> {
     None
 }
 
-fn parse_cli_usage(text: &str) -> Result<UsageSnapshot, ProviderErrorPayload> {
+fn parse_cli_usage_with_status(
+    text: &str,
+    status_text: Option<&str>,
+) -> Result<UsageSnapshot, ProviderErrorPayload> {
     let lines: Vec<&str> = text.lines().collect();
 
     let session_percent = extract_percent_near_label(&lines, "Current session");
@@ -1698,7 +1859,7 @@ fn parse_cli_usage(text: &str) -> Result<UsageSnapshot, ProviderErrorPayload> {
         &["Current week (Opus)", "Current week (Sonnet only)", "Current week (Sonnet)"],
     );
 
-    let identity = parse_cli_identity(text);
+    let identity = parse_cli_identity_with_status(text, status_text);
 
     let primary = make_cli_rate_window(session_percent, session_reset.as_deref());
     let secondary = weekly_percent.map(|percent| make_cli_rate_window(percent, weekly_reset.as_deref()));
@@ -1728,28 +1889,37 @@ fn make_cli_rate_window(percent_left: f64, reset_text: Option<&str>) -> RateWind
     }
 }
 
-fn parse_cli_identity(text: &str) -> ProviderIdentitySnapshot {
-    let email = extract_cli_field(text, "Account:")
-        .or_else(|| extract_cli_field(text, "Email:"))
-        .or_else(|| find_email_in_text(text));
+fn parse_cli_identity_with_status(
+    usage_text: &str,
+    status_text: Option<&str>,
+) -> ProviderIdentitySnapshot {
+    let status_text = status_text.unwrap_or("");
+    let email = extract_cli_field(usage_text, "Account:")
+        .or_else(|| extract_cli_field(usage_text, "Email:"))
+        .or_else(|| extract_cli_field(status_text, "Account:"))
+        .or_else(|| extract_cli_field(status_text, "Email:"))
+        .or_else(|| find_email_in_text(usage_text))
+        .or_else(|| find_email_in_text(status_text));
 
-    let organization = extract_cli_field(text, "Org:")
-        .or_else(|| extract_cli_field(text, "Organization:"))
-        .and_then(|org| {
-            let org = org.trim().to_string();
-            if org.is_empty() {
+    let organization = extract_cli_field(usage_text, "Org:")
+        .or_else(|| extract_cli_field(usage_text, "Organization:"))
+        .or_else(|| extract_cli_field(status_text, "Org:"))
+        .or_else(|| extract_cli_field(status_text, "Organization:"))
+        .and_then(|organization| {
+            let trimmed = organization.trim().to_string();
+            if trimmed.is_empty() {
                 return None;
             }
-            // Suppress if the org is just the email prefix
             if let Some(ref email) = email {
-                if org.to_lowercase().starts_with(&email.to_lowercase()) {
+                if trimmed.to_lowercase().starts_with(&email.to_lowercase()) {
                     return None;
                 }
             }
-            Some(org)
+            Some(trimmed)
         });
 
-    let login_method = extract_login_method(text);
+    let login_method =
+        extract_login_method(status_text).or_else(|| extract_login_method(usage_text));
 
     ProviderIdentitySnapshot {
         provider_id: Some(ProviderId::Claude.to_string()),
@@ -2340,7 +2510,7 @@ Resets Jan 30 at 12am (UTC)
 Account: user@example.com
 Org: My Team
 ";
-        let result = parse_cli_usage(text);
+        let result = parse_cli_usage_with_status(text, None);
         assert!(result.is_ok());
         let snapshot = result.unwrap();
         let primary = snapshot.primary.as_ref().unwrap();
@@ -2379,7 +2549,7 @@ Org: My Team
 
   Esc to cancel
 ";
-        let result = parse_cli_usage(text);
+        let result = parse_cli_usage_with_status(text, None);
         assert!(result.is_ok());
         let snapshot = result.unwrap();
         let primary = snapshot.primary.as_ref().unwrap();
@@ -2388,6 +2558,28 @@ Org: My Team
         assert!((secondary.used_percent - 22.0).abs() < 0.01);
         let tertiary = snapshot.tertiary.as_ref().unwrap();
         assert!((tertiary.used_percent - 3.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_parse_cli_identity_status_fallback() {
+        let usage = "\
+Current session
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+75% remaining
+Resets at 5pm (UTC)
+";
+        let status = "\
+Account: status@example.com
+Org: Status Team
+Login method: Claude Pro
+";
+        let result = parse_cli_usage_with_status(usage, Some(status));
+        assert!(result.is_ok());
+        let snapshot = result.unwrap();
+        let identity = snapshot.identity.as_ref().unwrap();
+        assert_eq!(identity.account_email.as_deref(), Some("status@example.com"));
+        assert_eq!(identity.account_organization.as_deref(), Some("Status Team"));
+        assert_eq!(identity.login_method.as_deref(), Some("Claude Pro"));
     }
 
     #[test]

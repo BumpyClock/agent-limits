@@ -76,3 +76,11 @@
   What I tried: Re-exported existing device flow functions from agent_stats_core, added state enum and async methods on AgentStatsApp, rendered inline UI in the Copilot settings card with clipboard/browser integration.
   Outcome: Compiles clean; all 189 tests pass. Device flow lifecycle: Idle -> RequestingCode -> ShowingCode -> Polling -> Success/Error.
   Next time: Closures passed to `cx.spawn` that capture non-Copy locals need `move`; form rebuild after config change requires a flag checked in `render()` since `window` is only available there.
+- Context: Claude CLI PTY `/usage` capture was inconsistent.
+  What I tried: Reworked PTY capture to mirror CodexBar’s session loop, enriched CLI environment defaults, and added `/status` fallback for identity parsing.
+  Outcome: PTY capture follows CodexBar timing and prompt handling; `cargo check -p agent_stats_core` clean.
+  Next time: Keep the PTY loop aligned with the Swift reference before adding new heuristics.
+- Context: Claude CLI `/usage` input was being sent before the prompt was ready.
+  What I tried: Added a prompt-ready wait (up to 6s) before sending `/usage`, then drained output to avoid pre-init noise.
+  Outcome: PTY capture should no longer send `/usage` before the UI is ready.
+  Next time: If the prompt wait still races, confirm cursor query handling before adding longer delays.

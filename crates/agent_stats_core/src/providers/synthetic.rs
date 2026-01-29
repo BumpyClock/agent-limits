@@ -1,4 +1,4 @@
-use crate::config::ProviderSourceMode;
+use crate::config::{ProviderConfig, ProviderSourceMode};
 use crate::models::{ProviderIdentitySnapshot, ProviderPayload, RateWindow, UsageSnapshot};
 use crate::provider_metadata::ProviderId;
 use crate::token_storage::{SecureTokenStorage, accounts};
