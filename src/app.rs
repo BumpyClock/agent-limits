@@ -8,9 +8,10 @@ use agent_stats_core::models::{
 };
 use agent_stats_core::provider_metadata::{ProviderId, ProviderMetadata, provider_metadata};
 use agent_stats_core::token_accounts::{TokenAccountSupport, token_account_support};
+use agent_stats_core::{DeviceFlowPollResult, request_device_code, poll_for_token};
 use gpui::{
-    App, Application, AsyncApp, Context, Entity, Render, Task, WeakEntity, Window, WindowBounds,
-    WindowOptions, div, px, size, prelude::*,
+    App, Application, AsyncApp, ClipboardItem, Context, Entity, Render, Task, WeakEntity, Window,
+    WindowBounds, WindowOptions, div, px, size, prelude::*,
 };
 use gpui_component::button::Button;
 use gpui_component::checkbox::Checkbox;
@@ -89,6 +90,23 @@ enum ProviderMoveDirection {
     Down,
 }
 
+#[derive(Clone)]
+enum CopilotDeviceFlowState {
+    Idle,
+    RequestingCode,
+    ShowingCode {
+        user_code: String,
+        verification_uri: String,
+        device_code: String,
+        interval: u64,
+    },
+    Polling {
+        user_code: String,
+    },
+    Success,
+    Error(String),
+}
+
 pub struct AgentStatsApp {
     providers: Vec<ProviderState>,
     config: AppConfig,
@@ -100,6 +118,9 @@ pub struct AgentStatsApp {
     error: Option<String>,
     refresh_task: Option<Task<()>>,
     show_settings: bool,
+    copilot_device_flow: CopilotDeviceFlowState,
+    copilot_device_flow_task: Option<Task<()>>,
+    needs_form_rebuild: bool,
 }
 
 impl AgentStatsApp {
@@ -124,6 +145,9 @@ impl AgentStatsApp {
             error: None,
             refresh_task: None,
             show_settings: false,
+            copilot_device_flow: CopilotDeviceFlowState::Idle,
+            copilot_device_flow_task: None,
+            needs_form_rebuild: false,
         };
         app.schedule_refresh_loop(cx);
         app.refresh_now(cx);
@@ -523,6 +547,151 @@ impl AgentStatsApp {
             self.persist_config_and_refresh(cx);
         }
     }
+
+    fn start_copilot_device_flow(&mut self, cx: &mut Context<Self>) {
+        self.copilot_device_flow = CopilotDeviceFlowState::RequestingCode;
+        cx.notify();
+
+        let task = cx.spawn(|this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let mut cx = cx.clone();
+            async move {
+                let result = cx.background_executor().spawn(async move {
+                    request_device_code()
+                }).await;
+
+                let _ = this.update(&mut cx, |app, cx| {
+                    match result {
+                        Ok(response) => {
+                            app.copilot_device_flow = CopilotDeviceFlowState::ShowingCode {
+                                user_code: response.user_code,
+                                verification_uri: response.verification_uri,
+                                device_code: response.device_code,
+                                interval: response.interval,
+                            };
+                        }
+                        Err(error) => {
+                            app.copilot_device_flow =
+                                CopilotDeviceFlowState::Error(error.message);
+                        }
+                    }
+                    cx.notify();
+                });
+            }
+        });
+
+        self.copilot_device_flow_task = Some(task);
+    }
+
+    fn start_copilot_polling(
+        &mut self,
+        device_code: String,
+        interval: u64,
+        user_code: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.copilot_device_flow = CopilotDeviceFlowState::Polling {
+            user_code,
+        };
+        cx.notify();
+
+        let task = cx.spawn(move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let mut cx = cx.clone();
+            async move {
+                let mut current_interval = interval;
+
+                loop {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_secs(current_interval))
+                        .await;
+
+                    let device_code = device_code.clone();
+                    let poll_result = cx.background_executor().spawn(async move {
+                        poll_for_token(&device_code)
+                    }).await;
+
+                    enum PollAction {
+                        Continue(u64),
+                        Done,
+                    }
+
+                    let action = match this.update(&mut cx, |app, cx| {
+                        match poll_result {
+                            Ok(DeviceFlowPollResult::Token(token)) => {
+                                app.complete_copilot_device_flow(token, cx);
+                                PollAction::Done
+                            }
+                            Ok(DeviceFlowPollResult::Pending) => {
+                                PollAction::Continue(current_interval)
+                            }
+                            Ok(DeviceFlowPollResult::SlowDown) => {
+                                PollAction::Continue(current_interval + 5)
+                            }
+                            Err(error) => {
+                                app.copilot_device_flow =
+                                    CopilotDeviceFlowState::Error(error.message);
+                                app.copilot_device_flow_task = None;
+                                cx.notify();
+                                PollAction::Done
+                            }
+                        }
+                    }) {
+                        Ok(action) => action,
+                        Err(_) => PollAction::Done,
+                    };
+
+                    match action {
+                        PollAction::Continue(interval) => {
+                            current_interval = interval;
+                        }
+                        PollAction::Done => break,
+                    }
+                }
+            }
+        });
+
+        self.copilot_device_flow_task = Some(task);
+    }
+
+    fn complete_copilot_device_flow(&mut self, token: String, cx: &mut Context<Self>) {
+        if let Some(provider) = self
+            .config
+            .providers
+            .iter_mut()
+            .find(|provider| provider.id == ProviderId::Copilot)
+        {
+            provider.api_key = Some(token);
+            provider.enabled = Some(true);
+        }
+
+        self.persist_config_and_refresh(cx);
+        self.copilot_device_flow = CopilotDeviceFlowState::Success;
+        self.copilot_device_flow_task = None;
+        self.needs_form_rebuild = true;
+        cx.notify();
+
+        let task = cx.spawn(|this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let mut cx = cx.clone();
+            async move {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(3))
+                    .await;
+                let _ = this.update(&mut cx, |app, cx| {
+                    if matches!(app.copilot_device_flow, CopilotDeviceFlowState::Success) {
+                        app.copilot_device_flow = CopilotDeviceFlowState::Idle;
+                        cx.notify();
+                    }
+                });
+            }
+        });
+
+        self.copilot_device_flow_task = Some(task);
+    }
+
+    fn cancel_copilot_device_flow(&mut self, cx: &mut Context<Self>) {
+        self.copilot_device_flow = CopilotDeviceFlowState::Idle;
+        self.copilot_device_flow_task = None;
+        cx.notify();
+    }
 }
 
 fn move_provider_in_config(
@@ -556,7 +725,13 @@ fn move_provider_in_config(
 }
 
 impl Render for AgentStatsApp {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.needs_form_rebuild {
+            self.needs_form_rebuild = false;
+            self.provider_forms = build_provider_forms(&self.config, window, cx);
+            self.token_account_forms = build_token_account_forms(&self.config, window, cx);
+        }
+
         let content: gpui::AnyElement = if self.show_settings {
             render_settings(self, cx)
         } else {
@@ -873,6 +1048,12 @@ fn render_provider_settings_card(
         None
     };
 
+    let device_flow_section = if provider.config.id == ProviderId::Copilot {
+        Some(render_copilot_device_flow_section(app, cx))
+    } else {
+        None
+    };
+
     let token_accounts = render_token_accounts_section(provider, app, cx);
 
     Some(
@@ -887,11 +1068,156 @@ fn render_provider_settings_card(
             .when_some(source_buttons, |this, buttons| this.child(buttons))
             .when_some(cookie_header_input, |this, input| this.child(input))
             .when_some(api_key_input, |this, input| this.child(input))
+            .when_some(device_flow_section, |this, section| this.child(section))
             .when_some(region_input, |this, input| this.child(input))
             .when_some(workspace_input, |this, input| this.child(input))
             .when_some(token_accounts, |this, section| this.child(section))
             .into_any_element(),
     )
+}
+
+fn render_copilot_device_flow_section(
+    app: &AgentStatsApp,
+    cx: &mut Context<AgentStatsApp>,
+) -> gpui::AnyElement {
+    match &app.copilot_device_flow {
+        CopilotDeviceFlowState::Idle => {
+            let has_token = app
+                .config
+                .providers
+                .iter()
+                .find(|provider| provider.id == ProviderId::Copilot)
+                .and_then(|provider| provider.api_key.as_ref())
+                .map(|key| !key.trim().is_empty())
+                .unwrap_or(false);
+
+            let label = if has_token {
+                "Sign in again with GitHub"
+            } else {
+                "Sign in with GitHub"
+            };
+
+            div()
+                .child(
+                    Button::new("copilot-device-flow-start")
+                        .label(label)
+                        .on_click(cx.listener(|app, _event, _window, cx| {
+                            app.start_copilot_device_flow(cx);
+                        })),
+                )
+                .into_any_element()
+        }
+        CopilotDeviceFlowState::RequestingCode => {
+            div()
+                .child(Label::new("Requesting device code...").text_sm())
+                .into_any_element()
+        }
+        CopilotDeviceFlowState::ShowingCode {
+            user_code,
+            verification_uri,
+            device_code,
+            interval,
+        } => {
+            let user_code = user_code.clone();
+            let verification_uri = verification_uri.clone();
+            let device_code = device_code.clone();
+            let interval = *interval;
+
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(8.0))
+                .child(Label::new("Enter this code on GitHub:").text_sm())
+                .child(
+                    div()
+                        .rounded_md()
+                        .bg(gpui::rgba(0x50AAFF26))
+                        .paddings(px(10.0))
+                        .child(Label::new(user_code.clone()).text_lg()),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .child(
+                            Button::new("copilot-open-browser")
+                                .label("Open Browser & Start")
+                                .on_click(cx.listener(move |app, _event, _window, cx| {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(
+                                        user_code.clone(),
+                                    ));
+                                    cx.open_url(&verification_uri);
+                                    app.start_copilot_polling(
+                                        device_code.clone(),
+                                        interval,
+                                        user_code.clone(),
+                                        cx,
+                                    );
+                                })),
+                        )
+                        .child(
+                            Button::new("copilot-cancel-showing")
+                                .label("Cancel")
+                                .on_click(cx.listener(|app, _event, _window, cx| {
+                                    app.cancel_copilot_device_flow(cx);
+                                })),
+                        ),
+                )
+                .into_any_element()
+        }
+        CopilotDeviceFlowState::Polling { user_code } => {
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(8.0))
+                .child(Label::new("Waiting for authentication...").text_sm())
+                .child(
+                    div()
+                        .rounded_md()
+                        .bg(gpui::rgba(0x50AAFF26))
+                        .paddings(px(10.0))
+                        .child(Label::new(format!("Code: {user_code}")).text_sm()),
+                )
+                .child(
+                    Button::new("copilot-cancel-polling")
+                        .label("Cancel")
+                        .on_click(cx.listener(|app, _event, _window, cx| {
+                            app.cancel_copilot_device_flow(cx);
+                        })),
+                )
+                .into_any_element()
+        }
+        CopilotDeviceFlowState::Success => {
+            div()
+                .rounded_md()
+                .bg(gpui::rgba(0x50C87826))
+                .paddings(px(10.0))
+                .child(Label::new("Login successful!").text_sm())
+                .into_any_element()
+        }
+        CopilotDeviceFlowState::Error(message) => {
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(8.0))
+                .child(
+                    div()
+                        .rounded_md()
+                        .bg(gpui::rgba(0xFF5A5A26))
+                        .paddings(px(8.0))
+                        .child(Label::new(message.clone()).text_sm()),
+                )
+                .child(
+                    Button::new("copilot-retry")
+                        .label("Try again")
+                        .on_click(cx.listener(|app, _event, _window, cx| {
+                            app.start_copilot_device_flow(cx);
+                        })),
+                )
+                .into_any_element()
+        }
+    }
 }
 
 fn render_token_accounts_section(

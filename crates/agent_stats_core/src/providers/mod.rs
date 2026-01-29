@@ -11,6 +11,7 @@ mod augment;
 mod claude;
 mod codex;
 mod copilot;
+pub use copilot::{DeviceCodeResponse, DeviceFlowPollResult, request_device_code, poll_for_token};
 mod cursor;
 mod factory;
 mod gemini;

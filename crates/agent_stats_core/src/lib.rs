@@ -9,3 +9,4 @@ pub use backend::{FetchRequest, FetchResult, ProviderPayloads, fetch_native_usag
 pub use config::{AppConfig, ConfigError, ProviderConfig, ProviderSourceMode};
 pub use models::*;
 pub use provider_metadata::{ProviderId, ProviderMetadata, provider_metadata};
+pub use providers::{DeviceCodeResponse, DeviceFlowPollResult, request_device_code, poll_for_token};

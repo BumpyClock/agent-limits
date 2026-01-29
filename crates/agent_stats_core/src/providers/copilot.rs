@@ -231,10 +231,7 @@ fn build_usage_snapshot(response: &CopilotUsageResponse, now: OffsetDateTime) ->
 // ---------------------------------------------------------------------------
 // Device flow (GitHub OAuth)
 // ---------------------------------------------------------------------------
-// These types and functions are provided for future device flow authentication support.
-// They are currently unused but match the Swift reference implementation.
 
-#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct DeviceCodeResponse {
     pub device_code: String,
@@ -244,20 +241,17 @@ pub struct DeviceCodeResponse {
     pub interval: u64,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct AccessTokenResponse {
     access_token: String,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct DeviceFlowErrorResponse {
     error: Option<String>,
     error_description: Option<String>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug)]
 pub enum DeviceFlowPollResult {
     Token(String),
@@ -265,9 +259,6 @@ pub enum DeviceFlowPollResult {
     SlowDown,
 }
 
-/// Request a device code for GitHub OAuth device flow.
-/// This function is provided for future use and matches the Swift reference implementation.
-#[allow(dead_code)]
 pub fn request_device_code() -> Result<DeviceCodeResponse, ProviderErrorPayload> {
     let body = format!("client_id={VSCODE_CLIENT_ID}&scope=read:user");
 
@@ -298,9 +289,6 @@ pub fn request_device_code() -> Result<DeviceCodeResponse, ProviderErrorPayload>
         .map_err(|error| provider_error(&format!("Failed to parse device code response: {error}")))
 }
 
-/// Poll for an access token using a device code.
-/// This function is provided for future use and matches the Swift reference implementation.
-#[allow(dead_code)]
 pub fn poll_for_token(device_code: &str) -> Result<DeviceFlowPollResult, ProviderErrorPayload> {
     let body = format!(
         "client_id={VSCODE_CLIENT_ID}&device_code={device_code}&grant_type=urn:ietf:params:oauth:grant-type:device_code"

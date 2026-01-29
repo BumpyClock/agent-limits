@@ -72,3 +72,7 @@
   What I tried: Waited for prompt glyphs before sending /usage, then drained pre-prompt output.
   Outcome: /usage should now send only after the interactive prompt is ready.
   Next time: Add a stricter prompt detector if Claude UI changes again.
+- Context: Wired Copilot GitHub OAuth device flow into the GPUI settings UI.
+  What I tried: Re-exported existing device flow functions from agent_stats_core, added state enum and async methods on AgentStatsApp, rendered inline UI in the Copilot settings card with clipboard/browser integration.
+  Outcome: Compiles clean; all 189 tests pass. Device flow lifecycle: Idle -> RequestingCode -> ShowingCode -> Polling -> Success/Error.
+  Next time: Closures passed to `cx.spawn` that capture non-Copy locals need `move`; form rebuild after config change requires a flag checked in `render()` since `window` is only available there.
