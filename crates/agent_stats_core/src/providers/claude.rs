@@ -1289,10 +1289,29 @@ impl ClaudePtySession {
 
         if let Some(wait_duration) = wait_for_prompt {
             let prompt_deadline = Instant::now() + wait_duration;
-            while Instant::now() < prompt_deadline {
+            let settle_idle_threshold = Duration::from_millis(500);
+            let max_settle = Duration::from_secs(3);
+
+            let mut needle_detected = false;
+            let mut settle_start: Option<Instant> = None;
+            let mut last_chunk_at = Instant::now();
+            let mut prompt_wait_buffer: Vec<u8> = Vec::new();
+
+            loop {
+                let effective_deadline = match settle_start {
+                    Some(began) => (began + max_settle).min(prompt_deadline + max_settle),
+                    None => prompt_deadline,
+                };
+                if Instant::now() >= effective_deadline {
+                    break;
+                }
+
                 match self.receiver.recv_timeout(Duration::from_millis(80)) {
                     Ok(chunk) => {
+                        last_chunk_at = Instant::now();
+                        prompt_wait_buffer.extend_from_slice(&chunk);
                         let scan_data = rolling.append(&chunk);
+
                         if Instant::now() >= next_cursor_check
                             && !scan_data.is_empty()
                             && contains_bytes(&scan_data, &cursor_query)
@@ -1300,24 +1319,50 @@ impl ClaudePtySession {
                             let _ = self.writer.write_all(&cursor_reply);
                             next_cursor_check = Instant::now() + Duration::from_secs(1);
                         }
+
+                        let stripped_for_send = if !send_needles.is_empty() {
+                            Some(strip_ansi_bytes(&prompt_wait_buffer))
+                        } else {
+                            None
+                        };
                         for (needle, response) in &send_needles {
-                            if !triggered_sends.contains(needle) && contains_bytes(&scan_data, needle) {
+                            if !triggered_sends.contains(needle)
+                                && (contains_bytes(&scan_data, needle)
+                                    || stripped_for_send
+                                        .as_ref()
+                                        .is_some_and(|stripped| contains_bytes(stripped, needle)))
+                            {
                                 let _ = self.writer.write_all(response);
                                 triggered_sends.insert(needle.clone());
                             }
                         }
-                        if prompt_needles.iter().any(|needle| contains_bytes(&scan_data, needle)) {
+
+                        if !needle_detected
+                            && prompt_needles
+                                .iter()
+                                .any(|needle| contains_bytes(&scan_data, needle))
+                        {
                             prompt_info.prompt_seen = true;
                             prompt_info.prompt_wait_ms = prompt_start.elapsed().as_millis();
+                            needle_detected = true;
+                            settle_start = Some(Instant::now());
+                        }
+                    }
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        if needle_detected && last_chunk_at.elapsed() >= settle_idle_threshold {
                             break;
                         }
                     }
-                    Err(mpsc::RecvTimeoutError::Timeout) => {}
                     Err(mpsc::RecvTimeoutError::Disconnected) => {
                         break;
                     }
                 }
+
+                if needle_detected && last_chunk_at.elapsed() >= settle_idle_threshold {
+                    break;
+                }
             }
+
             self.drain_output();
             rolling = RollingBuffer::new(max_needle);
         }
@@ -1367,8 +1412,23 @@ impl ClaudePtySession {
                 next_cursor_check = Instant::now() + Duration::from_secs(1);
             }
 
+            // Compute ANSI-stripped buffer once per iteration when new data arrived,
+            // so cursor-positioning escapes don't prevent needle matching.
+            let stripped_buffer = if !new_data.is_empty()
+                && (!stop_needles.is_empty() || !send_needles.is_empty())
+            {
+                Some(strip_ansi_bytes(&buffer))
+            } else {
+                None
+            };
+
             for (needle, response) in &send_needles {
-                if !triggered_sends.contains(needle) && contains_bytes(&scan_data, needle) {
+                if !triggered_sends.contains(needle)
+                    && (contains_bytes(&scan_data, needle)
+                        || stripped_buffer
+                            .as_ref()
+                            .is_some_and(|stripped| contains_bytes(stripped, needle)))
+                {
                     let _ = self.writer.write_all(response);
                     triggered_sends.insert(needle.clone());
                 }
@@ -1381,11 +1441,12 @@ impl ClaudePtySession {
                 }
             }
 
-            if let Some((index, _)) = stop_needles
-                .iter()
-                .enumerate()
-                .find(|(_, needle)| contains_bytes(&scan_data, needle))
-            {
+            if let Some((index, _)) = stop_needles.iter().enumerate().find(|(_, needle)| {
+                contains_bytes(&scan_data, needle)
+                    || stripped_buffer
+                        .as_ref()
+                        .is_some_and(|stripped| contains_bytes(stripped, needle))
+            }) {
                 stopped_early = true;
                 stop_reason = ClaudePtyStopReason::StopNeedle(
                     String::from_utf8_lossy(&stop_needles[index]).to_string(),
@@ -2198,21 +2259,94 @@ fn detect_cli_version() -> Option<String> {
 // ANSI stripping
 // ---------------------------------------------------------------------------
 
+fn strip_ansi_bytes(input: &[u8]) -> Vec<u8> {
+    let mut result = Vec::with_capacity(input.len());
+    let mut index = 0;
+    while index < input.len() {
+        if input[index] == 0x1b {
+            index += 1;
+            if index >= input.len() {
+                break;
+            }
+            match input[index] {
+                b'[' => {
+                    // CSI sequence: ESC [ ... <final byte 0x40-0x7E>
+                    index += 1;
+                    while index < input.len() {
+                        let byte = input[index];
+                        index += 1;
+                        if (0x40..=0x7E).contains(&byte) {
+                            break;
+                        }
+                    }
+                }
+                b']' => {
+                    // OSC sequence: ESC ] ... (BEL | ESC \)
+                    index += 1;
+                    while index < input.len() {
+                        if input[index] == 0x07 {
+                            index += 1;
+                            break;
+                        }
+                        if input[index] == 0x1b
+                            && index + 1 < input.len()
+                            && input[index + 1] == b'\\'
+                        {
+                            index += 2;
+                            break;
+                        }
+                        index += 1;
+                    }
+                }
+                byte if (0x40..=0x5F).contains(&byte) => {
+                    // Two-byte Fe sequence: ESC + byte in 0x40-0x5F
+                    index += 1;
+                }
+                _ => {
+                    // Unknown escape; skip the ESC and keep the next byte
+                }
+            }
+        } else {
+            result.push(input[index]);
+            index += 1;
+        }
+    }
+    result
+}
+
 fn strip_ansi_codes(text: &str) -> String {
     let mut result = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
     while let Some(character) = chars.next() {
         if character == '\x1b' {
-            // Consume ESC [ ... <final byte>
-            if chars.peek() == Some(&'[') {
-                chars.next();
-                loop {
-                    match chars.next() {
-                        Some(next) if next.is_ascii_alphabetic() || next == '~' => break,
-                        Some(_) => continue,
-                        None => break,
+            match chars.peek() {
+                Some(&'[') => {
+                    // CSI sequence: ESC [ ... <final byte>
+                    chars.next();
+                    loop {
+                        match chars.next() {
+                            Some(next) if next.is_ascii_alphabetic() || next == '~' => break,
+                            Some(_) => continue,
+                            None => break,
+                        }
                     }
                 }
+                Some(&']') => {
+                    // OSC sequence: ESC ] ... (BEL | ESC \)
+                    chars.next();
+                    loop {
+                        match chars.next() {
+                            Some('\x07') => break,
+                            Some('\x1b') if chars.peek() == Some(&'\\') => {
+                                chars.next();
+                                break;
+                            }
+                            Some(_) => continue,
+                            None => break,
+                        }
+                    }
+                }
+                _ => {}
             }
         } else {
             result.push(character);
@@ -2862,5 +2996,91 @@ Login method: Claude Pro
     #[test]
     fn test_extract_reset_from_line_no_reset() {
         assert_eq!(extract_reset_from_line("75% remaining"), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // strip_ansi_bytes
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_strip_ansi_bytes_csi() {
+        // CSI cursor positioning: ESC[15;3H
+        let input = b"\x1b[15;3HCurrent\x1b[15;11Hsession";
+        let stripped = strip_ansi_bytes(input);
+        assert_eq!(stripped, b"Currentsession");
+    }
+
+    #[test]
+    fn test_strip_ansi_bytes_osc_bel_terminated() {
+        // OSC terminated by BEL (0x07)
+        let input = b"\x1b]0;window title\x07hello";
+        let stripped = strip_ansi_bytes(input);
+        assert_eq!(stripped, b"hello");
+    }
+
+    #[test]
+    fn test_strip_ansi_bytes_osc_st_terminated() {
+        // OSC terminated by ST (ESC \)
+        let input = b"\x1b]0;window title\x1b\\hello";
+        let stripped = strip_ansi_bytes(input);
+        assert_eq!(stripped, b"hello");
+    }
+
+    #[test]
+    fn test_strip_ansi_bytes_fe_sequence() {
+        // Two-byte Fe sequence (e.g. ESC D = index)
+        let input = b"before\x1bDafter";
+        let stripped = strip_ansi_bytes(input);
+        assert_eq!(stripped, b"beforeafter");
+    }
+
+    #[test]
+    fn test_strip_ansi_bytes_no_escapes() {
+        let input = b"plain text with no escapes";
+        let stripped = strip_ansi_bytes(input);
+        assert_eq!(stripped, input.to_vec());
+    }
+
+    #[test]
+    fn test_strip_ansi_bytes_mixed() {
+        // Color codes + cursor positioning
+        let input = b"\x1b[32mCurrent\x1b[0m \x1b[15;11Hsession";
+        let stripped = strip_ansi_bytes(input);
+        assert_eq!(stripped, b"Current session");
+    }
+
+    #[test]
+    fn test_fragmented_needle_matches_after_stripping() {
+        // Simulates how Claude Code TUI renders "Current session" with
+        // cursor-positioning escapes between characters.
+        let raw_output = b"\x1b[15;3HCurrent\x1b[15;11Hsession";
+        let needle = b"Currentsession";
+
+        // Raw match should fail because escape sequences sit between words
+        assert!(!contains_bytes(raw_output, needle));
+
+        // After stripping ANSI, the needle matches
+        let stripped = strip_ansi_bytes(raw_output);
+        assert!(contains_bytes(&stripped, needle));
+    }
+
+    // -----------------------------------------------------------------------
+    // strip_ansi_codes (updated for OSC)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_strip_ansi_codes_osc_bel() {
+        assert_eq!(
+            strip_ansi_codes("\x1b]0;My Title\x07visible"),
+            "visible"
+        );
+    }
+
+    #[test]
+    fn test_strip_ansi_codes_osc_st() {
+        assert_eq!(
+            strip_ansi_codes("\x1b]0;My Title\x1b\\visible"),
+            "visible"
+        );
     }
 }

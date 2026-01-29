@@ -85,6 +85,14 @@
   Outcome: PTY capture should no longer send `/usage` before the UI is ready.
   Next time: If the prompt wait still races, confirm cursor query handling before adding longer delays.
 - Context: Claude Sonnet weekly limit needed to show separately.
-  What I tried: Rendered tertiary usage windows in the UI and labeled Claude’s tertiary window as “Sonnet”.
+  What I tried: Rendered tertiary usage windows in the UI and labeled Claude's tertiary window as "Sonnet".
   Outcome: Claude cards now show the extra Sonnet limit when available.
   Next time: Consider provider metadata labels if more providers expose tertiary windows.
+- Context: Claude CLI PTY capture loop timed out because stop needles (e.g. "Current session") were fragmented by ANSI cursor-positioning escape sequences in raw PTY bytes.
+  What I tried: Added `strip_ansi_bytes()` to strip CSI/OSC/Fe sequences from raw bytes, and added a secondary ANSI-stripped fallback check in the capture loop alongside the existing raw rolling-buffer check. Also enhanced `strip_ansi_codes()` with OSC sequence handling.
+  Outcome: All 275 tests pass including new tests for byte-level stripping and fragmented needle matching; no new clippy warnings.
+  Next time: When matching text needles in PTY output, always consider that TUI apps use cursor-positioning escapes that fragment rendered text in the raw byte stream.
+- Context: Claude CLI PTY `/usage` sent before CLI was ready — prompt needle `❯` appeared ~1s during TUI init but rendering continued for hundreds of milliseconds more.
+  What I tried: Replaced immediate `break` on prompt needle detection with a two-phase approach: (1) detect needle as before, (2) settle phase — wait for 500ms of PTY idle or 3s max after needle detection before proceeding. Also added ANSI-stripped fallback for send_needles during prompt wait.
+  Outcome: All 275 tests pass; `/usage` is now sent only after the TUI finishes rendering, not just after the first prompt glyph appears.
+  Next time: When a TUI prompt character appears early in initialization, don't assume the TUI is ready — wait for output to settle (idle gap) before sending input.
