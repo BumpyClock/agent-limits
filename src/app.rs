@@ -18,6 +18,7 @@ use gpui_component::checkbox::Checkbox;
 use gpui_component::input::{Input, InputState};
 use gpui_component::label::Label;
 use gpui_component::progress::Progress;
+use gpui_component::skeleton::Skeleton;
 use gpui_component::scroll::ScrollableElement as _;
 use gpui_component::{Disableable, Selectable, StyledExt};
 use gpui_component::Root;
@@ -783,7 +784,7 @@ impl Render for AgentStatsApp {
                         .config
                         .enabled
                         .unwrap_or(provider.metadata.default_enabled)
-                }).map(|provider| render_provider_card(provider, &self.settings)));
+                }).map(|provider| render_provider_card(provider, &self.settings, self.refreshing)));
 
             div()
                 .size_full()
@@ -1348,7 +1349,11 @@ fn render_settings_input(label: &str, input: Input) -> gpui::AnyElement {
         .into_any_element()
 }
 
-fn render_provider_card(provider: &ProviderState, settings: &AppSettings) -> gpui::AnyElement {
+fn render_provider_card(
+    provider: &ProviderState,
+    settings: &AppSettings,
+    refreshing: bool,
+) -> gpui::AnyElement {
     let payload = provider.payload.as_ref();
     let usage = payload.and_then(|payload| payload.usage.as_ref());
     let status_indicator = payload
@@ -1359,6 +1364,7 @@ fn render_provider_card(provider: &ProviderState, settings: &AppSettings) -> gpu
         || payload
             .and_then(|payload| payload.credits.as_ref())
             .is_some();
+    let is_loading = refreshing && !has_snapshot && error.is_none();
     let stale_badge = error.map(|_| {
         let label = if has_snapshot {
             "Stale"
@@ -1386,11 +1392,15 @@ fn render_provider_card(provider: &ProviderState, settings: &AppSettings) -> gpu
                 .when_some(stale_badge, |this, badge| this.child(badge)),
         );
 
-    let usage_section = usage
-        .map(|snapshot| render_usage(snapshot, provider.metadata.id, settings))
-        .unwrap_or_else(|| {
-            div().child(Label::new("No usage data")).into_any_element()
-        });
+    let usage_section = if is_loading {
+        render_usage_loading(provider.metadata.id)
+    } else {
+        usage
+            .map(|snapshot| render_usage(snapshot, provider.metadata.id, settings))
+            .unwrap_or_else(|| {
+                div().child(Label::new("No usage data")).into_any_element()
+            })
+    };
 
     let identity_section = usage
         .and_then(|snapshot| snapshot.identity.as_ref())
@@ -1497,6 +1507,51 @@ fn render_usage(
         .when_some(primary, |this, window| this.child(window))
         .when_some(secondary, |this, window| this.child(window))
         .when_some(tertiary, |this, window| this.child(window))
+        .into_any_element()
+}
+
+fn render_usage_loading(provider_id: ProviderId) -> gpui::AnyElement {
+    let row_count = if provider_id == ProviderId::Claude { 3 } else { 2 };
+    let mut rows = Vec::with_capacity(row_count);
+    for _ in 0..row_count {
+        rows.push(render_loading_metric_row());
+    }
+
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(10.0))
+        .children(rows)
+        .into_any_element()
+}
+
+fn render_loading_metric_row() -> gpui::AnyElement {
+    let title = Skeleton::new()
+        .w(px(140.0))
+        .h(px(12.0))
+        .rounded_sm();
+    let bar = Skeleton::new()
+        .w_full()
+        .h(px(6.0))
+        .rounded_full();
+    let left = Skeleton::new()
+        .w(px(80.0))
+        .h(px(10.0))
+        .rounded_sm()
+        .secondary();
+    let right = Skeleton::new()
+        .w(px(120.0))
+        .h(px(10.0))
+        .rounded_sm()
+        .secondary();
+
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(6.0))
+        .child(title)
+        .child(bar)
+        .child(div().flex().justify_between().child(left).child(right))
         .into_any_element()
 }
 

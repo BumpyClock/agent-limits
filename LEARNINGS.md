@@ -96,3 +96,7 @@
   What I tried: Replaced immediate `break` on prompt needle detection with a two-phase approach: (1) detect needle as before, (2) settle phase — wait for 500ms of PTY idle or 3s max after needle detection before proceeding. Also added ANSI-stripped fallback for send_needles during prompt wait.
   Outcome: All 275 tests pass; `/usage` is now sent only after the TUI finishes rendering, not just after the first prompt glyph appears.
   Next time: When a TUI prompt character appears early in initialization, don't assume the TUI is ready — wait for output to settle (idle gap) before sending input.
+- Context: Main window loading state looked like unknown usage.
+  What I tried: Added gpui-component Skeleton rows for the usage section when refreshing without a snapshot.
+  Outcome: Provider cards now show loading placeholders while data fetches.
+  Next time: Keep skeletons scoped to the usage section so headers remain readable.
