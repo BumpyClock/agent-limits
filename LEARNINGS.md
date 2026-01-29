@@ -84,3 +84,7 @@
   What I tried: Added a prompt-ready wait (up to 6s) before sending `/usage`, then drained output to avoid pre-init noise.
   Outcome: PTY capture should no longer send `/usage` before the UI is ready.
   Next time: If the prompt wait still races, confirm cursor query handling before adding longer delays.
+- Context: Claude Sonnet weekly limit needed to show separately.
+  What I tried: Rendered tertiary usage windows in the UI and labeled Claude’s tertiary window as “Sonnet”.
+  Outcome: Claude cards now show the extra Sonnet limit when available.
+  Next time: Consider provider metadata labels if more providers expose tertiary windows.

@@ -1387,7 +1387,7 @@ fn render_provider_card(provider: &ProviderState, settings: &AppSettings) -> gpu
         );
 
     let usage_section = usage
-        .map(|snapshot| render_usage(snapshot, settings))
+        .map(|snapshot| render_usage(snapshot, provider.metadata.id, settings))
         .unwrap_or_else(|| {
             div().child(Label::new("No usage data")).into_any_element()
         });
@@ -1471,12 +1471,23 @@ fn render_identity_section(identity: &ProviderIdentitySnapshot) -> Option<gpui::
     )
 }
 
-fn render_usage(snapshot: &UsageSnapshot, settings: &AppSettings) -> gpui::AnyElement {
+fn render_usage(
+    snapshot: &UsageSnapshot,
+    provider_id: ProviderId,
+    settings: &AppSettings,
+) -> gpui::AnyElement {
     let primary = snapshot.primary.as_ref().map(|window| {
         render_rate_window("Session", window, settings)
     });
     let secondary = snapshot.secondary.as_ref().map(|window| {
         render_rate_window("Weekly", window, settings)
+    });
+    let tertiary = snapshot.tertiary.as_ref().map(|window| {
+        let label = match provider_id {
+            ProviderId::Claude => "Sonnet",
+            _ => "Tertiary",
+        };
+        render_rate_window(label, window, settings)
     });
 
     div()
@@ -1485,6 +1496,7 @@ fn render_usage(snapshot: &UsageSnapshot, settings: &AppSettings) -> gpui::AnyEl
         .gap(px(8.0))
         .when_some(primary, |this, window| this.child(window))
         .when_some(secondary, |this, window| this.child(window))
+        .when_some(tertiary, |this, window| this.child(window))
         .into_any_element()
 }
 
