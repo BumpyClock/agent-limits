@@ -3,6 +3,7 @@ use base64::Engine as _;
 use crate::config::ProviderSourceMode;
 use crate::models::{ProviderErrorPayload, ProviderIdentitySnapshot, ProviderPayload, RateWindow, UsageSnapshot};
 use crate::provider_metadata::ProviderId;
+use crate::token_storage::{SecureTokenStorage, accounts};
 use super::{Provider, ProviderFetchContext};
 use regex::Regex;
 use serde::Deserialize;
@@ -245,18 +246,31 @@ fn decode_session_info(token: &str) -> Option<SessionInfo> {
 }
 
 fn resolve_token(context: &ProviderFetchContext) -> Option<String> {
+    // Priority 1: Config api_key (existing behavior)
     if let Some(api_key) = context.provider_config.api_key.as_ref() {
         if let Some(cleaned) = cleaned(api_key) {
             return Some(cleaned);
         }
     }
 
+    // Priority 2: Cookie header from config (existing behavior)
     if let Some(cookie_header) = context.provider_config.cookie_header.as_ref() {
         if let Some(token) = override_from(cookie_header) {
             return Some(token);
         }
     }
 
+    // Priority 3: Secure storage
+    let storage = SecureTokenStorage::default();
+    if storage.is_available() {
+        if let Ok(stored_token) = storage.retrieve(accounts::KIMI) {
+            if let Some(token) = override_from(&stored_token) {
+                return Some(token);
+            }
+        }
+    }
+
+    // Priority 4: Environment variables
     if let Ok(env_token) = std::env::var("KIMI_AUTH_TOKEN") {
         if let Some(token) = override_from(&env_token) {
             return Some(token);

@@ -1,6 +1,7 @@
-use crate::config::ProviderSourceMode;
+use crate::config::{ProviderConfig, ProviderSourceMode};
 use crate::models::{ProviderErrorPayload, ProviderIdentitySnapshot, ProviderPayload, RateWindow, UsageSnapshot};
 use crate::provider_metadata::ProviderId;
+use crate::token_storage::{SecureTokenStorage, accounts};
 use super::{Provider, ProviderFetchContext};
 use regex::Regex;
 use serde_json::Value;
@@ -39,15 +40,12 @@ impl Provider for MiniMaxProvider {
         let region = MiniMaxRegion::from_config(context.provider_config.region.as_deref());
         let now = context.now;
 
-        let api_token = context.provider_config.api_key.clone().unwrap_or_default();
         let cookie_raw = context.provider_config.cookie_header.clone().unwrap_or_default();
 
         if matches!(source_mode, ProviderSourceMode::Api)
             || (matches!(source_mode, ProviderSourceMode::Auto) && cookie_raw.trim().is_empty())
         {
-            if api_token.trim().is_empty() {
-                return Err(provider_error("MiniMax API token missing."));
-            }
+            let api_token = resolve_api_token(&context.provider_config)?;
             let snapshot = fetch_api_usage(&api_token, now)?;
             return Ok(ProviderPayload {
                 provider: ProviderId::MiniMax.to_string(),
@@ -793,4 +791,35 @@ fn provider_error(message: &str) -> ProviderErrorPayload {
         message: message.to_string(),
         kind: Some("provider".to_string()),
     }
+}
+
+fn resolve_api_token(config: &ProviderConfig) -> Result<String, ProviderErrorPayload> {
+    // Priority 1: Environment variable
+    if let Ok(env_token) = std::env::var("MINIMAX_API_TOKEN") {
+        let token = env_token.trim();
+        if !token.is_empty() {
+            return Ok(token.to_string());
+        }
+    }
+
+    // Priority 2: Secure storage
+    let storage = SecureTokenStorage::default();
+    if storage.is_available() {
+        if let Ok(stored_token) = storage.retrieve(accounts::MINIMAX) {
+            let token = stored_token.trim();
+            if !token.is_empty() {
+                return Ok(token.to_string());
+            }
+        }
+    }
+
+    // Priority 3: Config file (fallback)
+    if let Some(config_token) = &config.api_key {
+        let token = config_token.trim();
+        if !token.is_empty() {
+            return Ok(token.to_string());
+        }
+    }
+
+    Err(provider_error("MiniMax API token missing. Set in config, MINIMAX_API_TOKEN env var, or store in secure storage."))
 }

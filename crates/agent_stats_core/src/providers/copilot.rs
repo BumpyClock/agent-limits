@@ -3,6 +3,7 @@ use crate::models::{
     ProviderErrorPayload, ProviderIdentitySnapshot, ProviderPayload, RateWindow, UsageSnapshot,
 };
 use crate::provider_metadata::ProviderId;
+use crate::token_storage::{SecureTokenStorage, accounts};
 
 use super::{Provider, ProviderFetchContext};
 use serde::Deserialize;
@@ -66,20 +67,36 @@ impl Provider for CopilotProvider {
 }
 
 fn resolve_token(config_api_key: &Option<String>) -> Result<String, ProviderErrorPayload> {
-    let raw_token = config_api_key
-        .clone()
-        .or_else(|| std::env::var("COPILOT_API_TOKEN").ok())
-        .unwrap_or_default();
-
-    let token = clean_token(&raw_token);
-
-    if token.is_empty() {
-        return Err(provider_error(
-            "Copilot token missing. Set in config apiKey or COPILOT_API_TOKEN env var.",
-        ));
+    // Priority 1: Environment variable
+    if let Ok(env_token) = std::env::var("COPILOT_API_TOKEN") {
+        let token = clean_token(&env_token);
+        if !token.is_empty() {
+            return Ok(token);
+        }
     }
 
-    Ok(token)
+    // Priority 2: Secure storage
+    let storage = SecureTokenStorage::default();
+    if storage.is_available() {
+        if let Ok(stored_token) = storage.retrieve(accounts::COPILOT) {
+            let token = clean_token(&stored_token);
+            if !token.is_empty() {
+                return Ok(token);
+            }
+        }
+    }
+
+    // Priority 3: Config file (fallback)
+    if let Some(config_token) = config_api_key {
+        let token = clean_token(config_token);
+        if !token.is_empty() {
+            return Ok(token);
+        }
+    }
+
+    Err(provider_error(
+        "Copilot token missing. Set in config apiKey, COPILOT_API_TOKEN env var, or authenticate via device flow.",
+    ))
 }
 
 /// Clean token by trimming whitespace and removing surrounding quotes.
@@ -348,6 +365,15 @@ pub fn poll_for_token(device_code: &str) -> Result<DeviceFlowPollResult, Provide
         serde_json::from_str(&body_string).map_err(|error| {
             provider_error(&format!("Failed to parse access token response: {error}"))
         })?;
+
+    // Store the token in secure storage
+    let storage = SecureTokenStorage::default();
+    if storage.is_available() {
+        let store_result = storage.store(accounts::COPILOT, &token_response.access_token);
+        if let Err(error) = store_result {
+            log::warn!("Failed to store Copilot token in secure storage: {error}");
+        }
+    }
 
     Ok(DeviceFlowPollResult::Token(token_response.access_token))
 }

@@ -1,6 +1,7 @@
 use crate::config::ProviderSourceMode;
 use crate::models::{ProviderIdentitySnapshot, ProviderPayload, RateWindow, UsageSnapshot};
 use crate::provider_metadata::ProviderId;
+use crate::token_storage::{SecureTokenStorage, accounts};
 use super::{Provider, ProviderFetchContext};
 use serde_json::Value;
 use time::OffsetDateTime;
@@ -29,20 +30,7 @@ impl Provider for SyntheticProvider {
             }
         }
 
-        let api_key = context
-            .provider_config
-            .api_key
-            .clone()
-            .or_else(|| std::env::var("SYNTHETIC_API_KEY").ok())
-            .unwrap_or_default();
-
-        if api_key.trim().is_empty() {
-            return Err(crate::models::ProviderErrorPayload {
-                code: 1,
-                message: "Synthetic API key missing. Set in config apiKey or SYNTHETIC_API_KEY.".to_string(),
-                kind: Some("provider".to_string()),
-            });
-        }
+        let api_key = resolve_token(&context.provider_config)?;
 
         let snapshot = fetch_usage(&api_key, context.now).map_err(|error| {
             crate::models::ProviderErrorPayload {
@@ -118,6 +106,41 @@ fn rate_window_for(quota: &SyntheticQuotaEntry) -> RateWindow {
         resets_at: quota.resets_at,
         reset_description: quota.reset_description.clone(),
     }
+}
+
+fn resolve_token(config: &ProviderConfig) -> Result<String, crate::models::ProviderErrorPayload> {
+    // Priority 1: Environment variable
+    if let Ok(env_token) = std::env::var("SYNTHETIC_API_KEY") {
+        let token = env_token.trim();
+        if !token.is_empty() {
+            return Ok(token.to_string());
+        }
+    }
+
+    // Priority 2: Secure storage
+    let storage = SecureTokenStorage::default();
+    if storage.is_available() {
+        if let Ok(stored_token) = storage.retrieve(accounts::SYNTHETIC) {
+            let token = stored_token.trim();
+            if !token.is_empty() {
+                return Ok(token.to_string());
+            }
+        }
+    }
+
+    // Priority 3: Config file (fallback)
+    if let Some(config_token) = &config.api_key {
+        let token = config_token.trim();
+        if !token.is_empty() {
+            return Ok(token.to_string());
+        }
+    }
+
+    Err(crate::models::ProviderErrorPayload {
+        code: 1,
+        message: "Synthetic API key missing. Set in config apiKey, SYNTHETIC_API_KEY env var, or store in secure storage.".to_string(),
+        kind: Some("provider".to_string()),
+    })
 }
 
 fn fetch_usage(api_key: &str, now: OffsetDateTime) -> Result<SyntheticUsageSnapshot, String> {

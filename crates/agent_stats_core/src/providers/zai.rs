@@ -1,9 +1,45 @@
-use crate::config::ProviderSourceMode;
+use crate::config::{ProviderConfig, ProviderSourceMode};
 use crate::models::{ProviderErrorPayload, ProviderIdentitySnapshot, ProviderPayload, RateWindow, UsageSnapshot};
 use crate::provider_metadata::ProviderId;
+use crate::token_storage::{SecureTokenStorage, accounts};
 use super::{Provider, ProviderFetchContext};
 use serde::Deserialize;
 use time::OffsetDateTime;
+
+fn resolve_token(config: &ProviderConfig) -> Result<String, ProviderErrorPayload> {
+    // Priority 1: Environment variable
+    if let Ok(env_token) = std::env::var("Z_AI_API_KEY") {
+        let token = clean_string(&env_token);
+        if !token.is_empty() {
+            return Ok(token);
+        }
+    }
+
+    // Priority 2: Secure storage
+    let storage = SecureTokenStorage::default();
+    if storage.is_available() {
+        if let Ok(stored_token) = storage.retrieve(accounts::ZAI) {
+            let token = clean_string(&stored_token);
+            if !token.is_empty() {
+                return Ok(token);
+            }
+        }
+    }
+
+    // Priority 3: Config file (fallback)
+    if let Some(config_token) = &config.api_key {
+        let token = clean_string(config_token);
+        if !token.is_empty() {
+            return Ok(token);
+        }
+    }
+
+    Err(ProviderErrorPayload {
+        code: 1,
+        message: "z.ai API key missing. Set apiKey in config, Z_AI_API_KEY env var, or store in secure storage.".to_string(),
+        kind: Some("provider".to_string()),
+    })
+}
 
 pub struct ZaiProvider;
 
@@ -29,23 +65,7 @@ impl Provider for ZaiProvider {
             }
         }
 
-        let api_key = context
-            .provider_config
-            .api_key
-            .clone()
-            .or_else(|| std::env::var("Z_AI_API_KEY").ok())
-            .unwrap_or_default();
-
-        let api_key = clean_string(&api_key);
-
-        if api_key.is_empty() {
-            return Err(ProviderErrorPayload {
-                code: 1,
-                message: "z.ai API key missing. Set apiKey in config or Z_AI_API_KEY env var."
-                    .to_string(),
-                kind: Some("provider".to_string()),
-            });
-        }
+        let api_key = resolve_token(&context.provider_config)?;
 
         let region = context
             .provider_config

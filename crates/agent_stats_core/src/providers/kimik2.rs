@@ -1,6 +1,7 @@
-use crate::config::ProviderSourceMode;
+use crate::config::{ProviderConfig, ProviderSourceMode};
 use crate::models::{ProviderErrorPayload, ProviderIdentitySnapshot, ProviderPayload, RateWindow, UsageSnapshot};
 use crate::provider_metadata::ProviderId;
+use crate::token_storage::{SecureTokenStorage, accounts};
 use super::{Provider, ProviderFetchContext};
 use serde_json::Value;
 use time::OffsetDateTime;
@@ -30,16 +31,7 @@ impl Provider for KimiK2Provider {
             }
         }
 
-        let api_key = context
-            .provider_config
-            .api_key
-            .clone()
-            .or_else(|| std::env::var("KIMIK2_API_KEY").ok())
-            .unwrap_or_default();
-
-        if api_key.trim().is_empty() {
-            return Err(provider_error("Missing Kimi K2 API key."));
-        }
+        let api_key = resolve_token(&context.provider_config)?;
 
         let response = ureq::get(CREDITS_URL)
             .set("Authorization", &format!("Bearer {api_key}"))
@@ -305,4 +297,35 @@ fn provider_error(message: &str) -> ProviderErrorPayload {
         message: message.to_string(),
         kind: Some("provider".to_string()),
     }
+}
+
+fn resolve_token(config: &ProviderConfig) -> Result<String, ProviderErrorPayload> {
+    // Priority 1: Environment variable
+    if let Ok(env_token) = std::env::var("KIMIK2_API_KEY") {
+        let token = env_token.trim();
+        if !token.is_empty() {
+            return Ok(token.to_string());
+        }
+    }
+
+    // Priority 2: Secure storage
+    let storage = SecureTokenStorage::default();
+    if storage.is_available() {
+        if let Ok(stored_token) = storage.retrieve(accounts::KIMIK2) {
+            let token = stored_token.trim();
+            if !token.is_empty() {
+                return Ok(token.to_string());
+            }
+        }
+    }
+
+    // Priority 3: Config file (fallback)
+    if let Some(config_token) = &config.api_key {
+        let token = config_token.trim();
+        if !token.is_empty() {
+            return Ok(token.to_string());
+        }
+    }
+
+    Err(provider_error("Missing Kimi K2 API key. Set in config, KIMIK2_API_KEY env var, or store in secure storage."))
 }

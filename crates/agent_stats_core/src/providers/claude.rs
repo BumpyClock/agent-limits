@@ -4,15 +4,55 @@ use crate::models::{
     RateWindow, UsageSnapshot,
 };
 use crate::provider_metadata::ProviderId;
+use crate::token_storage::{SecureTokenStorage, accounts};
 
 use super::{Provider, ProviderFetchContext};
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use serde::Deserialize;
 use std::io::{Read, Write};
+use std::sync::{Arc, OnceLock, RwLock};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 use time::OffsetDateTime;
+
+/// Simple synchronous cached token entry with expiration.
+struct CachedOAuthToken {
+    access_token: String,
+    expires_at: Option<Instant>,
+}
+
+/// 30-minute memory cache for Claude OAuth tokens.
+/// Uses std::sync::RwLock for synchronous access within the Provider trait.
+static OAUTH_TOKEN_CACHE: OnceLock<RwLock<Option<CachedOAuthToken>>> = OnceLock::new();
+
+fn get_cached_token() -> Option<String> {
+    let cache = OAUTH_TOKEN_CACHE.get_or_init(|| RwLock::new(None));
+    let guard = cache.read().ok()?;
+    guard.as_ref().and_then(|entry| {
+        // Check if token is still valid (not expired)
+        if let Some(expires_at) = entry.expires_at {
+            if Instant::now() < expires_at {
+                Some(entry.access_token.clone())
+            } else {
+                None
+            }
+        } else {
+            // No expiration set, treat as valid
+            Some(entry.access_token.clone())
+        }
+    })
+}
+
+fn set_cached_token(access_token: String, ttl: Duration) {
+    let cache = OAUTH_TOKEN_CACHE.get_or_init(|| RwLock::new(None));
+    if let Ok(mut guard) = cache.write() {
+        *guard = Some(CachedOAuthToken {
+            access_token,
+            expires_at: Some(Instant::now() + ttl),
+        });
+    }
+}
 
 pub struct ClaudeProvider;
 
@@ -384,10 +424,25 @@ fn load_oauth_credentials_with_override(
 }
 
 fn load_oauth_credentials() -> Result<OAuthCredentials, String> {
-    // Check environment variable override first
+    // Priority 1: Check memory cache first (fastest)
+    if let Some(cached_token) = get_cached_token() {
+        return Ok(OAuthCredentials {
+            access_token: cached_token,
+            refresh_token: None,
+            expires_at: None,
+            scopes: vec!["user:profile".to_string()],
+            rate_limit_tier: None,
+            from_environment: true,
+        });
+    }
+
+    // Priority 2: Check environment variable override
     if let Ok(token) = std::env::var("CODEXBAR_CLAUDE_OAUTH_TOKEN") {
         let token = token.trim().to_string();
         if !token.is_empty() {
+            // Store in cache for future requests
+            set_cached_token(token.clone(), Duration::from_secs(30 * 60));
+
             let scopes = std::env::var("CODEXBAR_CLAUDE_OAUTH_SCOPES")
                 .ok()
                 .map(|raw| {
@@ -410,7 +465,28 @@ fn load_oauth_credentials() -> Result<OAuthCredentials, String> {
         }
     }
 
-    // Try reading the credentials file
+    // Priority 3: Check secure storage
+    let storage = SecureTokenStorage::default();
+    if storage.is_available() {
+        if let Ok(stored_token) = storage.retrieve(accounts::CLAUDE) {
+            let token = stored_token.trim().to_string();
+            if !token.is_empty() {
+                // Store in cache for faster future access
+                set_cached_token(token.clone(), Duration::from_secs(30 * 60));
+
+                return Ok(OAuthCredentials {
+                    access_token: token,
+                    refresh_token: None,
+                    expires_at: None,
+                    scopes: vec!["user:profile".to_string()],
+                    rate_limit_tier: None,
+                    from_environment: true,
+                });
+            }
+        }
+    }
+
+    // Priority 4: Try reading the credentials file
     let home = dirs::home_dir().ok_or("Could not resolve home directory")?;
     let credentials_path = home.join(".claude").join(".credentials.json");
 
@@ -444,6 +520,17 @@ fn load_oauth_credentials() -> Result<OAuthCredentials, String> {
     let expires_at = oauth.expires_at.and_then(|millis| {
         OffsetDateTime::from_unix_timestamp((millis / 1000.0) as i64).ok()
     });
+
+    // Store in memory cache for faster future access (30 min TTL)
+    set_cached_token(access_token.clone(), Duration::from_secs(30 * 60));
+
+    // Store in secure storage for persistence across restarts
+    let storage = SecureTokenStorage::default();
+    if storage.is_available() {
+        if let Err(error) = storage.store(accounts::CLAUDE, &access_token) {
+            log::warn!("Failed to store Claude OAuth token in secure storage: {error}");
+        }
+    }
 
     Ok(OAuthCredentials {
         access_token,
