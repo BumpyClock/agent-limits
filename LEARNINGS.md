@@ -104,3 +104,7 @@
   What I tried: Rebuilt the header, added a glance strip, standardized card layout/typography, and added minimal fade animations for updates.
   Outcome: The main window now presents summaries first with consistent card hierarchy and motion polish.
   Next time: Keep glance strip derived from existing snapshots and hide it when no snapshots exist.
+- Context: Window chrome and app lifecycle felt incomplete across platforms.
+  What I tried: Added app menus, keybindings, reopen handling, and explicit titlebar/window options (app id, decorations, title).
+  Outcome: The app now shows a proper titlebar, menus, and consistent reopen behavior on macOS, Windows, and Linux.
+  Next time: Use AppContext + menu setup early in `run()` for lifecycle polish.
