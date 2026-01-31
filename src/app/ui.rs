@@ -95,27 +95,52 @@ impl Render for AgentStatsApp {
 
             let glance_strip = build_glance_summary(&self.providers, now)
                 .map(|summary| render_glance_strip(&summary, now, cx));
+            let scroll_handle = self.main_scroll_handle.clone();
+            let pending_focus = self.pending_main_provider_focus.take();
 
-            let provider_list = div().flex().flex_col().gap(px(16.0)).children(
-                self.providers
-                    .iter()
-                    .filter(|provider| provider_is_enabled(provider))
-                    .map(|provider| {
-                        render_provider_card(provider, &self.settings, self.refreshing, now, cx)
-                    }),
-            );
+            let mut provider_ids = Vec::new();
+            let mut provider_cards = Vec::new();
+            for provider in self.providers.iter().filter(|provider| provider_is_enabled(provider)) {
+                provider_ids.push(provider.config.id);
+                provider_cards.push(render_provider_card(
+                    provider,
+                    &self.settings,
+                    self.refreshing,
+                    now,
+                    cx,
+                ));
+            }
+
+            let mut scroll_children = Vec::new();
+            scroll_children.push(header.into_any_element());
+            if let Some(banner) = error_banner {
+                scroll_children.push(banner.into_any_element());
+            }
+            if let Some(strip) = glance_strip {
+                scroll_children.push(strip.into_any_element());
+            }
+            let provider_start_index = scroll_children.len();
+            scroll_children.extend(provider_cards);
+
+            if let Some(provider_id) = pending_focus {
+                if let Some(provider_index) =
+                    provider_ids.iter().position(|id| *id == provider_id)
+                {
+                    scroll_handle.scroll_to_top_of_item(provider_start_index + provider_index);
+                }
+            }
 
             div()
+                .id("main-scroll")
                 .size_full()
                 .flex()
                 .flex_col()
                 .gap(px(16.0))
                 .paddings(px(16.0))
-                .overflow_y_scrollbar()
-                .child(header)
-                .when_some(error_banner, |this, banner| this.child(banner))
-                .when_some(glance_strip, |this, strip| this.child(strip))
-                .child(provider_list)
+                .track_scroll(&scroll_handle)
+                .overflow_y_scroll()
+                .children(scroll_children)
+                .vertical_scrollbar(&scroll_handle)
                 .into_any_element()
         };
 
@@ -341,6 +366,7 @@ fn render_preview(app: &mut AgentStatsApp, cx: &mut Context<AgentStatsApp>) -> A
             if let Some(provider_id) = provider_ids_for_click.get(*ix).copied() {
                 app.preview_active_provider = Some(provider_id);
                 cx.notify();
+                super::open_main_window_for_provider(provider_id, cx);
             }
         }))
         .children(
@@ -962,9 +988,14 @@ fn render_preview_rate_window(
         .with_size(Size::Small);
 
     div()
+        .id(format!("preview-rate-{provider_id}-{label}"))
         .flex()
         .flex_col()
         .gap(px(4.0))
+        .cursor_pointer()
+        .on_click(move |_event, _window, cx| {
+            super::open_main_window_for_provider(provider_id, cx);
+        })
         .child(
             div()
                 .flex()

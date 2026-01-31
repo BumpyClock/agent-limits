@@ -108,3 +108,7 @@
   What I tried: Added app menus, keybindings, reopen handling, and explicit titlebar/window options (app id, decorations, title).
   Outcome: The app now shows a proper titlebar, menus, and consistent reopen behavior on macOS, Windows, and Linux.
   Next time: Use AppContext + menu setup early in `run()` for lifecycle polish.
+- Context: Needed programmatic scrolling and click handling on Div elements.
+  What I tried: Called `track_scroll` and `on_click` directly on `Div`.
+  Outcome: Compile errors because those helpers require `Stateful` elements.
+  Next time: Call `.id(...)` to get `Stateful<Div>` before using `track_scroll`, `overflow_y_scroll`, or `on_click`.

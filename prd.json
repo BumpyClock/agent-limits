@@ -43,9 +43,10 @@
         "Main window opens on the selected provider context"
       ],
       "priority": 3,
-      "passes": false,
+      "passes": true,
       "labels": [],
-      "dependsOn": []
+      "dependsOn": [],
+      "completionNotes": "Completed by agent"
     },
     {
       "id": "US-004",
@@ -123,6 +124,6 @@
     "createdAt": "2026-01-31T02:58:06.670Z",
     "version": "1.0.0",
     "sourcePrd": "prd.md",
-    "updatedAt": "2026-01-31T03:42:47.282Z"
+    "updatedAt": "2026-01-31T03:57:19.333Z"
   }
 }

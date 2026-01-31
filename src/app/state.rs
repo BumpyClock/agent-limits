@@ -5,7 +5,7 @@ use agent_stats_core::config::{
 use agent_stats_core::models::ProviderPayload;
 use agent_stats_core::provider_metadata::{ProviderId, ProviderMetadata, provider_metadata};
 use agent_stats_core::{DeviceFlowPollResult, poll_for_token, request_device_code};
-use gpui::{AppContext, AsyncApp, Context, ParentElement, Task, WeakEntity, Window};
+use gpui::{AppContext, AsyncApp, Context, ParentElement, ScrollHandle, Task, WeakEntity, Window};
 use gpui_component::label::Label;
 use gpui_component::WindowExt;
 use std::collections::HashMap;
@@ -37,10 +37,17 @@ pub(crate) struct AgentStatsApp {
     pub(crate) needs_form_rebuild: bool,
     pub(crate) view_mode: AppViewMode,
     pub(crate) preview_active_provider: Option<ProviderId>,
+    pub(crate) main_scroll_handle: ScrollHandle,
+    pub(crate) pending_main_provider_focus: Option<ProviderId>,
 }
 
 impl AgentStatsApp {
-    pub(crate) fn new(window: &mut Window, view_mode: AppViewMode, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(
+        window: &mut Window,
+        view_mode: AppViewMode,
+        initial_main_provider: Option<ProviderId>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let settings = AppSettings::load();
         let config = AppConfig::load_or_default().unwrap_or_else(|error| {
             log::error!("Failed to load config: {error}");
@@ -58,6 +65,11 @@ impl AgentStatsApp {
                     .unwrap_or(provider.metadata.default_enabled)
             })
             .map(|provider| provider.config.id);
+        let pending_main_provider_focus = if view_mode == AppViewMode::Main {
+            initial_main_provider
+        } else {
+            None
+        };
 
         let mut app = Self {
             providers,
@@ -75,6 +87,8 @@ impl AgentStatsApp {
             needs_form_rebuild: false,
             view_mode,
             preview_active_provider,
+            main_scroll_handle: ScrollHandle::new(),
+            pending_main_provider_focus,
         };
         app.schedule_refresh_loop(cx);
         app.refresh_now(cx);

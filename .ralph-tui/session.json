@@ -3,10 +3,10 @@
   "sessionId": "91628096-f51c-418f-91fd-0dc343388ecc",
   "status": "running",
   "startedAt": "2026-01-31T03:00:01.068Z",
-  "updatedAt": "2026-01-31T03:42:47.284Z",
-  "currentIteration": 1,
+  "updatedAt": "2026-01-31T03:57:19.334Z",
+  "currentIteration": 2,
   "maxIterations": 10,
-  "tasksCompleted": 1,
+  "tasksCompleted": 2,
   "isPaused": false,
   "agentPlugin": "codex",
   "trackerState": {
@@ -23,8 +23,8 @@
       {
         "id": "US-002",
         "title": "Minimal Preview UI (CodexBar-style)",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "US-003",
@@ -74,6 +74,16 @@
       "durationMs": 1491464,
       "startedAt": "2026-01-31T03:00:10.070Z",
       "endedAt": "2026-01-31T03:25:01.534Z"
+    },
+    {
+      "iteration": 2,
+      "status": "completed",
+      "taskId": "US-002",
+      "taskTitle": "Minimal Preview UI (CodexBar-style)",
+      "taskCompleted": true,
+      "durationMs": 1064526,
+      "startedAt": "2026-01-31T03:25:02.754Z",
+      "endedAt": "2026-01-31T03:42:47.280Z"
     }
   ],
   "skippedTaskIds": [],

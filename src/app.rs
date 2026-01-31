@@ -4,6 +4,7 @@ mod tray;
 mod types;
 mod ui;
 
+use agent_stats_core::provider_metadata::ProviderId;
 use gpui::{
     App, AppContext, Application, Context, KeyBinding, Menu, MenuItem, QuitMode, SystemMenuType,
     TitlebarOptions, Window, WindowBounds, WindowDecorations, WindowOptions, actions, point, px,
@@ -23,7 +24,7 @@ pub fn run() {
 
     app.on_reopen(|cx| {
         if cx.windows().is_empty() {
-            create_main_window(cx);
+            create_main_window(cx, None);
         } else if let Some(window) = cx.windows().first() {
             let _ = cx.update_window(*window, |_root, window, _cx| {
                 window.activate_window();
@@ -55,7 +56,7 @@ pub fn run() {
                 app.toggle_settings(cx);
             });
             if handled.is_none() {
-                create_main_window(cx);
+                create_main_window(cx, None);
             }
             let handled = handled.or_else(|| {
                 update_active_app(cx, |app, _window, cx| {
@@ -71,7 +72,7 @@ pub fn run() {
                 app.refresh_now(cx);
             });
             if handled.is_none() {
-                create_main_window(cx);
+                create_main_window(cx, None);
             }
             let handled = handled.or_else(|| {
                 update_active_app(cx, |app, _window, cx| {
@@ -87,7 +88,7 @@ pub fn run() {
                 app.open_about_dialog(window, cx);
             });
             if handled.is_none() {
-                create_main_window(cx);
+                create_main_window(cx, None);
             }
             let handled = handled.or_else(|| {
                 update_active_app(cx, |app, window, cx| {
@@ -104,7 +105,7 @@ pub fn run() {
             cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
             cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
         }
-        create_main_window(cx);
+        create_main_window(cx, None);
     });
 }
 
@@ -174,7 +175,21 @@ fn open_or_create_main_window(cx: &mut App) {
         window.activate_window();
     });
     if handled.is_none() {
-        create_main_window(cx);
+        create_main_window(cx, None);
+    }
+}
+
+pub(crate) fn open_main_window_for_provider(provider_id: ProviderId, cx: &mut App) {
+    let handled = update_app_by_mode(cx, AppViewMode::Main, |app, window, cx| {
+        app.show_settings = false;
+        app.pending_main_provider_focus = Some(provider_id);
+        cx.notify();
+        window.activate_window();
+    });
+    if handled.is_none() {
+        create_main_window(cx, Some(provider_id));
+    } else {
+        cx.activate(true);
     }
 }
 
@@ -194,7 +209,7 @@ fn toggle_preview_window(cx: &mut App) {
     create_preview_window(cx);
 }
 
-fn create_main_window(cx: &mut App) {
+fn create_main_window(cx: &mut App, initial_provider: Option<ProviderId>) {
     let window_options = WindowOptions {
         window_bounds: Some(WindowBounds::centered(size(px(840.0), px(720.0)), cx)),
         titlebar: Some(TitlebarOptions {
@@ -210,7 +225,7 @@ fn create_main_window(cx: &mut App) {
     let result = cx.open_window(window_options, |window, cx| {
         window.activate_window();
         window.set_window_title(APP_TITLE);
-        let app = cx.new(|cx| AgentStatsApp::new(window, AppViewMode::Main, cx));
+        let app = cx.new(|cx| AgentStatsApp::new(window, AppViewMode::Main, initial_provider, cx));
         cx.new(|cx| Root::new(app, window, cx))
     });
     if result.is_ok() {
@@ -236,7 +251,7 @@ fn create_preview_window(cx: &mut App) {
         window.activate_window();
         let title = format!("{APP_TITLE} Preview");
         window.set_window_title(&title);
-        let app = cx.new(|cx| AgentStatsApp::new(window, AppViewMode::Preview, cx));
+        let app = cx.new(|cx| AgentStatsApp::new(window, AppViewMode::Preview, None, cx));
         cx.new(|cx| Root::new(app, window, cx))
     });
 }
@@ -261,4 +276,26 @@ fn find_window_by_mode(cx: &mut App, mode: AppViewMode) -> Option<gpui::AnyWindo
         .flatten()
         .unwrap_or(false)
     })
+}
+
+fn update_app_by_mode<R>(
+    cx: &mut App,
+    mode: AppViewMode,
+    update: impl FnOnce(&mut AgentStatsApp, &mut Window, &mut Context<AgentStatsApp>) -> R,
+) -> Option<R> {
+    let window_handle = find_window_by_mode(cx, mode)?;
+    cx.update_window(window_handle, |root_view, window, cx| {
+        let root_entity = match root_view.downcast::<Root>() {
+            Ok(entity) => entity,
+            Err(_) => return None,
+        };
+        let app_view = root_entity.read(cx).view().clone();
+        let app_entity = match app_view.downcast::<AgentStatsApp>() {
+            Ok(entity) => entity,
+            Err(_) => return None,
+        };
+        Some(app_entity.update(cx, |app, cx| update(app, window, cx)))
+    })
+    .ok()
+    .flatten()
 }
