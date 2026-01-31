@@ -16,8 +16,8 @@ use uuid::Uuid;
 use crate::settings::AppSettings;
 use super::forms::{build_provider_forms, build_token_account_forms};
 use super::types::{
-    CopilotDeviceFlowState, ProviderMoveDirection, ProviderSettingsForm, ProviderState,
-    TokenAccountForm,
+    AppViewMode, CopilotDeviceFlowState, ProviderMoveDirection, ProviderSettingsForm,
+    ProviderState, TokenAccountForm,
 };
 use crate::app::APP_TITLE;
 
@@ -35,10 +35,12 @@ pub(crate) struct AgentStatsApp {
     pub(crate) copilot_device_flow: CopilotDeviceFlowState,
     pub(crate) copilot_device_flow_task: Option<Task<()>>,
     pub(crate) needs_form_rebuild: bool,
+    pub(crate) view_mode: AppViewMode,
+    pub(crate) preview_active_provider: Option<ProviderId>,
 }
 
 impl AgentStatsApp {
-    pub(crate) fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(window: &mut Window, view_mode: AppViewMode, cx: &mut Context<Self>) -> Self {
         let settings = AppSettings::load();
         let config = AppConfig::load_or_default().unwrap_or_else(|error| {
             log::error!("Failed to load config: {error}");
@@ -47,6 +49,15 @@ impl AgentStatsApp {
         let providers = build_provider_states(&config);
         let provider_forms = build_provider_forms(&config, window, cx);
         let token_account_forms = build_token_account_forms(&config, window, cx);
+        let preview_active_provider = providers
+            .iter()
+            .find(|provider| {
+                provider
+                    .config
+                    .enabled
+                    .unwrap_or(provider.metadata.default_enabled)
+            })
+            .map(|provider| provider.config.id);
 
         let mut app = Self {
             providers,
@@ -62,6 +73,8 @@ impl AgentStatsApp {
             copilot_device_flow: CopilotDeviceFlowState::Idle,
             copilot_device_flow_task: None,
             needs_form_rebuild: false,
+            view_mode,
+            preview_active_provider,
         };
         app.schedule_refresh_loop(cx);
         app.refresh_now(cx);

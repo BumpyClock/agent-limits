@@ -48,3 +48,9 @@ pub(crate) enum CopilotDeviceFlowState {
     Success,
     Error(String),
 }
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AppViewMode {
+    Main,
+    Preview,
+}

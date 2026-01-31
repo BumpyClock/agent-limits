@@ -13,6 +13,7 @@ use gpui_component::Root;
 
 use self::state::AgentStatsApp;
 use self::tray::TrayController;
+use self::types::AppViewMode;
 
 pub fn run() {
     let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
@@ -179,16 +180,18 @@ fn open_or_create_main_window(cx: &mut App) {
 
 #[cfg(target_os = "windows")]
 fn toggle_preview_window(cx: &mut App) {
-    let handled = update_active_app(cx, |_app, window, _cx| {
-        if window.is_window_active() {
-            window.minimize_window();
-        } else {
-            window.activate_window();
-        }
-    });
-    if handled.is_none() {
-        create_main_window(cx);
+    if let Some(window_handle) = find_window_by_mode(cx, AppViewMode::Preview) {
+        let _ = cx.update_window(window_handle, |_root, window, _cx| {
+            if window.is_window_active() {
+                window.minimize_window();
+            } else {
+                window.activate_window();
+            }
+        });
+        return;
     }
+
+    create_preview_window(cx);
 }
 
 fn create_main_window(cx: &mut App) {
@@ -207,10 +210,55 @@ fn create_main_window(cx: &mut App) {
     let result = cx.open_window(window_options, |window, cx| {
         window.activate_window();
         window.set_window_title(APP_TITLE);
-        let app = cx.new(|cx| AgentStatsApp::new(window, cx));
+        let app = cx.new(|cx| AgentStatsApp::new(window, AppViewMode::Main, cx));
         cx.new(|cx| Root::new(app, window, cx))
     });
     if result.is_ok() {
         cx.activate(true);
     }
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn create_preview_window(cx: &mut App) {
+    let window_options = WindowOptions {
+        window_bounds: Some(WindowBounds::centered(size(px(360.0), px(420.0)), cx)),
+        titlebar: Some(TitlebarOptions {
+            title: Some(format!("{APP_TITLE} Preview").into()),
+            appears_transparent: false,
+            traffic_light_position: Some(point(px(12.0), px(12.0))),
+        }),
+        app_id: Some(APP_ID.to_string()),
+        window_decorations: Some(WindowDecorations::Server),
+        ..Default::default()
+    };
+
+    let _ = cx.open_window(window_options, |window, cx| {
+        window.activate_window();
+        let title = format!("{APP_TITLE} Preview");
+        window.set_window_title(&title);
+        let app = cx.new(|cx| AgentStatsApp::new(window, AppViewMode::Preview, cx));
+        cx.new(|cx| Root::new(app, window, cx))
+    });
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn find_window_by_mode(cx: &mut App, mode: AppViewMode) -> Option<gpui::AnyWindowHandle> {
+    let windows = cx.windows();
+    windows.into_iter().find(|window_handle| {
+        cx.update_window(*window_handle, |root_view, _window, cx| {
+            let root_entity = match root_view.downcast::<Root>() {
+                Ok(entity) => entity,
+                Err(_) => return None,
+            };
+            let app_view = root_entity.read(cx).view().clone();
+            let app_entity = match app_view.downcast::<AgentStatsApp>() {
+                Ok(entity) => entity,
+                Err(_) => return None,
+            };
+            Some(app_entity.read(cx).view_mode == mode)
+        })
+        .ok()
+        .flatten()
+        .unwrap_or(false)
+    })
 }

@@ -16,7 +16,8 @@ use gpui_component::label::Label;
 use gpui_component::progress::Progress;
 use gpui_component::scroll::ScrollableElement as _;
 use gpui_component::skeleton::Skeleton;
-use gpui_component::{ActiveTheme, Disableable, Selectable, StyledExt};
+use gpui_component::tab::{Tab, TabBar};
+use gpui_component::{ActiveTheme, Disableable, Selectable, Size, Sizable, StyledExt};
 use std::time::Duration as StdDuration;
 use time::{Duration, OffsetDateTime};
 
@@ -24,7 +25,7 @@ use super::forms::{
     build_provider_forms, build_token_account_forms, provider_settings_spec, source_mode_label,
 };
 use super::state::AgentStatsApp;
-use super::types::{CopilotDeviceFlowState, ProviderMoveDirection, ProviderState};
+use super::types::{AppViewMode, CopilotDeviceFlowState, ProviderMoveDirection, ProviderState};
 use super::{About, KEY_CONTEXT, Minimize, OpenSettings, Refresh, Zoom};
 use crate::settings::{AppSettings, RefreshCadence};
 
@@ -36,7 +37,9 @@ impl Render for AgentStatsApp {
             self.token_account_forms = build_token_account_forms(&self.config, window, cx);
         }
 
-        let content: AnyElement = if self.show_settings {
+        let content: AnyElement = if self.view_mode == AppViewMode::Preview {
+            render_preview(self, cx)
+        } else if self.show_settings {
             render_settings(self, cx)
         } else {
             let now = OffsetDateTime::now_utc();
@@ -284,6 +287,95 @@ fn render_settings(app: &mut AgentStatsApp, cx: &mut Context<AgentStatsApp>) -> 
             this.child(div().child(Label::new("Provider settings")))
                 .child(provider_settings)
         })
+        .into_any_element()
+}
+
+fn render_preview(app: &mut AgentStatsApp, cx: &mut Context<AgentStatsApp>) -> AnyElement {
+    let now = OffsetDateTime::now_utc();
+    let enabled_providers: Vec<&ProviderState> = app
+        .providers
+        .iter()
+        .filter(|provider| provider_is_enabled(provider))
+        .collect();
+
+    if enabled_providers.is_empty() {
+        return div()
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(
+                Label::new("No providers enabled")
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground),
+            )
+            .into_any_element();
+    }
+
+    let provider_ids: Vec<ProviderId> = enabled_providers
+        .iter()
+        .map(|provider| provider.config.id)
+        .collect();
+    let active_provider = app
+        .preview_active_provider
+        .filter(|provider_id| provider_ids.contains(provider_id))
+        .or_else(|| provider_ids.first().copied());
+    if active_provider != app.preview_active_provider {
+        app.preview_active_provider = active_provider;
+    }
+    let active_index = active_provider
+        .and_then(|provider_id| {
+            provider_ids
+                .iter()
+                .position(|candidate| *candidate == provider_id)
+        })
+        .unwrap_or(0);
+
+    let provider_ids_for_click = provider_ids.clone();
+    let tabs = TabBar::new("preview-tabs")
+        .w_full()
+        .underline()
+        .with_size(Size::Small)
+        .selected_index(active_index)
+        .on_click(cx.listener(move |app, ix: &usize, _window, cx| {
+            if let Some(provider_id) = provider_ids_for_click.get(*ix).copied() {
+                app.preview_active_provider = Some(provider_id);
+                cx.notify();
+            }
+        }))
+        .children(
+            enabled_providers
+                .iter()
+                .map(|provider| Tab::new().label(provider.metadata.display_name)),
+        );
+
+    let selected_provider = active_provider.and_then(|provider_id| {
+        enabled_providers
+            .iter()
+            .find(|provider| provider.config.id == provider_id)
+    });
+
+    let body = if let Some(provider) = selected_provider {
+        render_preview_provider_card(provider, &app.settings, app.refreshing, now, cx)
+    } else {
+        div()
+            .child(
+                Label::new("No provider selected")
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground),
+            )
+            .into_any_element()
+    };
+
+    div()
+        .size_full()
+        .flex()
+        .flex_col()
+        .gap(px(10.0))
+        .paddings(px(12.0))
+        .overflow_y_scrollbar()
+        .child(tabs)
+        .child(body)
         .into_any_element()
 }
 
@@ -676,6 +768,254 @@ fn render_settings_input(label: &str, input: Input) -> AnyElement {
         .into_any_element()
 }
 
+fn render_preview_provider_card(
+    provider: &ProviderState,
+    settings: &AppSettings,
+    refreshing: bool,
+    now: OffsetDateTime,
+    cx: &App,
+) -> AnyElement {
+    let payload = provider.payload.as_ref();
+    let usage = payload.and_then(|payload| payload.usage.as_ref());
+    let status_indicator = payload
+        .and_then(|payload| payload.status.as_ref())
+        .map(|status| status.indicator.clone());
+    let error = payload.and_then(|payload| payload.error.as_ref());
+    let has_snapshot = usage.is_some()
+        || payload
+            .and_then(|payload| payload.credits.as_ref())
+            .is_some();
+    let is_loading = refreshing && !has_snapshot && error.is_none();
+    let updated_text = provider_updated_text(usage, error, is_loading, now);
+
+    let status_dot = status_indicator.map(render_status_dot);
+    let header = div()
+        .flex()
+        .items_center()
+        .justify_between()
+        .child(
+            Label::new(provider.metadata.display_name)
+                .text_sm()
+                .font_semibold(),
+        )
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .when_some(status_dot, |this, dot| this.child(dot))
+                .child(
+                    Label::new(updated_text)
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground),
+                ),
+        );
+
+    let usage_section = if is_loading {
+        render_preview_usage_loading(provider.metadata.id)
+    } else {
+        let content = usage
+            .map(|snapshot| render_preview_usage(snapshot, provider.metadata.id, settings, cx))
+            .unwrap_or_else(|| {
+                div()
+                    .child(
+                        Label::new("No usage data")
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground),
+                    )
+                    .into_any_element()
+            });
+        div()
+            .child(content)
+            .with_animation(
+                format!("preview-usage-fade-{}", provider.metadata.id),
+                Animation::new(StdDuration::from_millis(150))
+                    .with_easing(cubic_bezier(0.25, 1.0, 0.5, 1.0)),
+                |this, delta| this.opacity(delta),
+            )
+            .into_any_element()
+    };
+
+    let credits = payload
+        .and_then(|payload| payload.credits.as_ref())
+        .map(|credits| render_preview_credits_row(credits.remaining, cx));
+
+    let error_row = error.map(|error| render_preview_error_row(&error.message, cx));
+
+    div()
+        .rounded_md()
+        .border_1()
+        .bg(cx.theme().secondary.opacity(0.35))
+        .paddings(px(12.0))
+        .flex()
+        .flex_col()
+        .gap(px(10.0))
+        .child(header)
+        .child(usage_section)
+        .when_some(credits, |this, credits| {
+            this.child(section_divider(cx)).child(credits)
+        })
+        .when_some(error_row, |this, error| {
+            this.child(section_divider(cx)).child(error)
+        })
+        .into_any_element()
+}
+
+fn render_preview_usage(
+    snapshot: &UsageSnapshot,
+    provider_id: ProviderId,
+    settings: &AppSettings,
+    cx: &App,
+) -> AnyElement {
+    let accent = provider_accent_color(provider_id, cx);
+    let primary = snapshot.primary.as_ref().map(|window| {
+        render_preview_rate_window(provider_id, "Session", window, settings, accent, cx)
+    });
+    let secondary = snapshot.secondary.as_ref().map(|window| {
+        render_preview_rate_window(provider_id, "Weekly", window, settings, accent, cx)
+    });
+    let tertiary = snapshot.tertiary.as_ref().map(|window| {
+        let label = match provider_id {
+            ProviderId::Claude => "Sonnet",
+            _ => "Tertiary",
+        };
+        render_preview_rate_window(provider_id, label, window, settings, accent, cx)
+    });
+
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(8.0))
+        .when_some(primary, |this, window| this.child(window))
+        .when_some(secondary, |this, window| this.child(window))
+        .when_some(tertiary, |this, window| this.child(window))
+        .into_any_element()
+}
+
+fn render_preview_usage_loading(provider_id: ProviderId) -> AnyElement {
+    let row_count = if provider_id == ProviderId::Claude {
+        3
+    } else {
+        2
+    };
+    let mut rows = Vec::with_capacity(row_count);
+    for _ in 0..row_count {
+        rows.push(render_preview_loading_metric_row());
+    }
+
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(8.0))
+        .children(rows)
+        .into_any_element()
+}
+
+fn render_preview_loading_metric_row() -> AnyElement {
+    let title = Skeleton::new().w(px(120.0)).h(px(10.0)).rounded_sm();
+    let bar = Skeleton::new().w_full().h(px(4.0)).rounded_full();
+    let meta = Skeleton::new()
+        .w(px(140.0))
+        .h(px(8.0))
+        .rounded_sm()
+        .secondary();
+
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(4.0))
+        .child(title)
+        .child(bar)
+        .child(meta)
+        .into_any_element()
+}
+
+fn render_preview_rate_window(
+    provider_id: ProviderId,
+    label: &str,
+    window: &RateWindow,
+    settings: &AppSettings,
+    accent: Hsla,
+    cx: &App,
+) -> AnyElement {
+    let percent = if settings.show_used {
+        window.used_percent
+    } else {
+        window.remaining_percent()
+    };
+    let percent_label = if settings.show_used { "used" } else { "left" };
+    let show_reset = window.resets_at.is_some()
+        || window
+            .reset_description
+            .as_ref()
+            .is_some_and(|description| !description.trim().is_empty());
+    let reset_text = format_reset(
+        window.resets_at,
+        settings.show_absolute_reset,
+        window.reset_description.as_deref(),
+    );
+
+    let bar_color = accent.blend(cx.theme().foreground.opacity(0.35));
+    let bar = Progress::new(format!("preview-bar-{}-{label}", provider_id))
+        .value(percent as f32)
+        .color(bar_color)
+        .with_size(Size::Small);
+
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(4.0))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(Label::new(label.to_string()).text_sm().font_semibold())
+                .child(
+                    Label::new(format!("{percent:.0}% {percent_label}"))
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground),
+                ),
+        )
+        .child(bar)
+        .when(show_reset, |this| {
+            this.child(
+                Label::new(reset_text)
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground),
+            )
+        })
+        .into_any_element()
+}
+
+fn render_preview_credits_row(remaining: f64, cx: &App) -> AnyElement {
+    div()
+        .flex()
+        .items_center()
+        .justify_between()
+        .child(
+            Label::new("Credits remaining")
+                .text_xs()
+                .text_color(cx.theme().muted_foreground),
+        )
+        .child(Label::new(format!("{remaining:.2}")).text_sm().font_semibold())
+        .into_any_element()
+}
+
+fn render_preview_error_row(message: &str, cx: &App) -> AnyElement {
+    div()
+        .rounded_md()
+        .border_1()
+        .bg(cx.theme().danger.opacity(0.12))
+        .paddings(px(8.0))
+        .child(
+            Label::new(message.to_string())
+                .text_xs()
+                .text_color(cx.theme().danger_foreground),
+        )
+        .into_any_element()
+}
+
 fn render_provider_card(
     provider: &ProviderState,
     settings: &AppSettings,
@@ -982,15 +1322,19 @@ fn render_rate_window(
         .into_any_element()
 }
 
+fn render_status_dot(indicator: ProviderStatusIndicator) -> AnyElement {
+    div()
+        .w(px(8.0))
+        .h(px(8.0))
+        .rounded_full()
+        .bg(status_indicator_color(&indicator))
+        .into_any_element()
+}
+
 fn render_status_indicator(indicator: Option<ProviderStatusIndicator>, cx: &App) -> AnyElement {
-    let (color, label) = match indicator.unwrap_or(ProviderStatusIndicator::Unknown) {
-        ProviderStatusIndicator::None => (gpui::rgba(0x50C878FF), "Operational"),
-        ProviderStatusIndicator::Minor => (gpui::rgba(0xFFC850FF), "Minor"),
-        ProviderStatusIndicator::Major => (gpui::rgba(0xFF8C50FF), "Major"),
-        ProviderStatusIndicator::Critical => (gpui::rgba(0xFF5A5AFF), "Critical"),
-        ProviderStatusIndicator::Maintenance => (gpui::rgba(0x7878FFFF), "Maintenance"),
-        ProviderStatusIndicator::Unknown => (gpui::rgba(0x969696FF), "Unknown"),
-    };
+    let indicator = indicator.unwrap_or(ProviderStatusIndicator::Unknown);
+    let color = status_indicator_color(&indicator);
+    let label = status_indicator_label(&indicator);
 
     div()
         .flex()
@@ -1003,6 +1347,28 @@ fn render_status_indicator(indicator: Option<ProviderStatusIndicator>, cx: &App)
                 .text_color(cx.theme().muted_foreground),
         )
         .into_any_element()
+}
+
+fn status_indicator_color(indicator: &ProviderStatusIndicator) -> Hsla {
+    match indicator {
+        ProviderStatusIndicator::None => gpui::rgba(0x50C878FF).into(),
+        ProviderStatusIndicator::Minor => gpui::rgba(0xFFC850FF).into(),
+        ProviderStatusIndicator::Major => gpui::rgba(0xFF8C50FF).into(),
+        ProviderStatusIndicator::Critical => gpui::rgba(0xFF5A5AFF).into(),
+        ProviderStatusIndicator::Maintenance => gpui::rgba(0x7878FFFF).into(),
+        ProviderStatusIndicator::Unknown => gpui::rgba(0x969696FF).into(),
+    }
+}
+
+fn status_indicator_label(indicator: &ProviderStatusIndicator) -> &'static str {
+    match indicator {
+        ProviderStatusIndicator::None => "Operational",
+        ProviderStatusIndicator::Minor => "Minor",
+        ProviderStatusIndicator::Major => "Major",
+        ProviderStatusIndicator::Critical => "Critical",
+        ProviderStatusIndicator::Maintenance => "Maintenance",
+        ProviderStatusIndicator::Unknown => "Unknown",
+    }
 }
 
 struct GlanceSummary {
