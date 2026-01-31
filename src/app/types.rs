@@ -55,4 +55,5 @@ pub(crate) enum AppViewMode {
     Main,
     Preview,
     Settings,
+    History,
 }

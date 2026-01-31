@@ -18,12 +18,15 @@ use gpui_component::scroll::ScrollableElement as _;
 use gpui_component::skeleton::Skeleton;
 use gpui_component::tab::{Tab, TabBar};
 use gpui_component::{ActiveTheme, Disableable, Selectable, Size, Sizable, StyledExt};
+use std::collections::HashSet;
+use std::str::FromStr;
 use std::time::Duration as StdDuration;
-use time::{Duration, OffsetDateTime};
+use time::{Date, Duration, OffsetDateTime};
 
 use super::forms::{
     build_provider_forms, build_token_account_forms, provider_settings_spec, source_mode_label,
 };
+use super::history;
 use super::state::AgentStatsApp;
 use super::types::{AppViewMode, CopilotDeviceFlowState, ProviderMoveDirection, ProviderState};
 use super::{About, KEY_CONTEXT, Minimize, OpenSettings, Refresh, Zoom};
@@ -41,6 +44,8 @@ impl Render for AgentStatsApp {
             render_preview(self, cx)
         } else if self.view_mode == AppViewMode::Settings {
             render_settings(self, cx)
+        } else if self.view_mode == AppViewMode::History {
+            render_history(self, cx)
         } else {
             let now = OffsetDateTime::now_utc();
             let header = div()
@@ -370,6 +375,88 @@ fn render_settings(app: &mut AgentStatsApp, cx: &mut Context<AgentStatsApp>) -> 
             ))
             .child(provider_settings)
         })
+        .into_any_element()
+}
+
+fn render_history(app: &mut AgentStatsApp, cx: &mut Context<AgentStatsApp>) -> AnyElement {
+    let now = OffsetDateTime::now_utc();
+    let range_days = app.history_range_days;
+    let summary_result = history::load_history_summary(range_days, now);
+    let scroll_handle = app.history_scroll_handle.clone();
+
+    let header = div()
+        .flex()
+        .flex_col()
+        .gap(px(4.0))
+        .child(Label::new("History").text_lg().font_semibold())
+        .child(
+            Label::new("Daily usage aggregates with period comparisons.")
+                .text_sm()
+                .text_color(cx.theme().muted_foreground),
+        );
+
+    let range_buttons = render_history_range_buttons(range_days, cx);
+
+    let range_label = summary_result.as_ref().ok().map(|summary| {
+        format_history_range_label(summary.range_start, summary.range_end, summary.range_days)
+    });
+
+    let range_caption = range_label.map(|label| {
+        Label::new(label)
+            .text_sm()
+            .text_color(cx.theme().muted_foreground)
+            .into_any_element()
+    });
+
+    let content = match summary_result {
+        Ok(summary) => {
+            if summary.providers.is_empty() {
+                div()
+                    .rounded_md()
+                    .border_1()
+                    .bg(cx.theme().secondary.opacity(0.35))
+                    .paddings(px(12.0))
+                    .child(
+                        Label::new("No history data yet.")
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground),
+                    )
+                    .into_any_element()
+            } else {
+                let provider_cards = render_history_provider_cards(app, &summary, cx);
+                div().flex().flex_col().gap(px(16.0)).children(provider_cards).into_any_element()
+            }
+        }
+        Err(error) => div()
+            .rounded_md()
+            .border_1()
+            .bg(cx.theme().danger.opacity(0.12))
+            .paddings(px(12.0))
+            .child(
+                Label::new(format!("Failed to load history: {error}"))
+                    .text_sm()
+                    .text_color(cx.theme().danger_foreground),
+            )
+            .into_any_element(),
+    };
+
+    let mut children: Vec<AnyElement> = vec![header.into_any_element(), range_buttons];
+    if let Some(caption) = range_caption {
+        children.push(caption);
+    }
+    children.push(content);
+
+    div()
+        .id("history-scroll")
+        .size_full()
+        .flex()
+        .flex_col()
+        .gap(px(16.0))
+        .paddings(px(16.0))
+        .track_scroll(&scroll_handle)
+        .overflow_y_scroll()
+        .vertical_scrollbar(&scroll_handle)
+        .children(children)
         .into_any_element()
 }
 
@@ -930,6 +1017,230 @@ fn render_settings_group_header(title: &str, caption: Option<&str>, cx: &App) ->
             )
         })
         .into_any_element()
+}
+
+fn render_history_range_buttons(
+    selected_days: u32,
+    cx: &mut Context<AgentStatsApp>,
+) -> AnyElement {
+    let ranges = [7, 30, 90];
+    let buttons = ranges.into_iter().map(|days| {
+        let selected = selected_days == days;
+        Button::new(format!("history-range-{days}"))
+            .label(format!("{days}d"))
+            .selected(selected)
+            .on_click(cx.listener(move |app, _event, _window, cx| {
+                app.history_range_days = days;
+                cx.notify();
+            }))
+    });
+
+    div()
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .child(
+            Label::new("Range")
+                .text_sm()
+                .text_color(cx.theme().muted_foreground),
+        )
+        .children(buttons)
+        .into_any_element()
+}
+
+fn render_history_provider_cards(
+    app: &AgentStatsApp,
+    summary: &history::HistorySummary,
+    cx: &App,
+) -> Vec<AnyElement> {
+    let mut provider_order = Vec::new();
+    let mut seen = HashSet::new();
+
+    for provider in &app.providers {
+        let key = provider.config.id.to_string();
+        if summary.providers.contains_key(&key) {
+            seen.insert(key.clone());
+            provider_order.push(key);
+        }
+    }
+
+    let mut extras: Vec<String> = summary
+        .providers
+        .keys()
+        .filter(|provider| !seen.contains(*provider))
+        .cloned()
+        .collect();
+    extras.sort();
+    provider_order.extend(extras);
+
+    provider_order
+        .into_iter()
+        .filter_map(|provider| {
+            summary
+                .providers
+                .get(&provider)
+                .map(|summary| render_history_provider_card(summary, cx))
+        })
+        .collect()
+}
+
+fn render_history_provider_card(
+    summary: &history::ProviderHistorySummary,
+    cx: &App,
+) -> AnyElement {
+    let display_name = provider_display_name(&summary.provider);
+    let current = summary.current;
+    let delta_text = format_delta_text(current.average, summary.previous);
+
+    let analytics = div()
+        .flex()
+        .flex_wrap()
+        .gap(px(16.0))
+        .child(render_history_metric(
+            "Total usage",
+            &format!("{:.1} pts", current.total),
+            cx,
+        ))
+        .child(render_history_metric(
+            "Avg / day",
+            &format!("{:.1}%", current.average),
+            cx,
+        ))
+        .child(render_history_metric("Δ vs prev", &delta_text, cx));
+
+    let coverage = if current.days_with_data > 0 {
+        format!("Tracked {} days", current.days_with_data)
+    } else {
+        "No tracked days".to_string()
+    };
+
+    let daily_rows = if summary.daily.is_empty() {
+        vec![div()
+            .child(
+                Label::new("No usage history in this range.")
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground),
+            )
+            .into_any_element()]
+    } else {
+        summary
+            .daily
+            .iter()
+            .rev()
+            .map(|daily| render_history_day_row(daily, cx))
+            .collect()
+    };
+
+    div()
+        .rounded_lg()
+        .border_1()
+        .bg(cx.theme().secondary.opacity(0.35))
+        .paddings(px(16.0))
+        .flex()
+        .flex_col()
+        .gap(px(12.0))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(Label::new(display_name).text_lg().font_semibold())
+                .child(
+                    Label::new(coverage)
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground),
+                ),
+        )
+        .child(analytics)
+        .child(section_divider(cx))
+        .child(div().flex().flex_col().gap(px(8.0)).children(daily_rows))
+        .into_any_element()
+}
+
+fn render_history_metric(label: &str, value: &str, cx: &App) -> AnyElement {
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(2.0))
+        .child(
+            Label::new(label.to_string())
+                .text_xs()
+                .text_color(cx.theme().muted_foreground),
+        )
+        .child(Label::new(value.to_string()).text_sm().font_semibold())
+        .into_any_element()
+}
+
+fn render_history_day_row(
+    daily: &history::DailyUsageAggregate,
+    cx: &App,
+) -> AnyElement {
+    let date_label = format_history_day(daily.date);
+    let value_label = format!("{:.1}%", daily.average);
+    let sample_label = if daily.samples == 1 {
+        "1 sample".to_string()
+    } else {
+        format!("{} samples", daily.samples)
+    };
+
+    div()
+        .flex()
+        .items_center()
+        .justify_between()
+        .child(Label::new(date_label).text_sm())
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .child(
+                    Label::new(sample_label)
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground),
+                )
+                .child(Label::new(value_label).text_sm().font_semibold()),
+        )
+        .into_any_element()
+}
+
+fn format_delta_text(current_average: f64, previous: Option<history::PeriodStats>) -> String {
+    let Some(previous) = previous else {
+        return "—".to_string();
+    };
+
+    if previous.days_with_data == 0 {
+        return "—".to_string();
+    }
+
+    let delta = current_average - previous.average;
+    if previous.average.abs() > 0.01 {
+        let percent = (delta / previous.average) * 100.0;
+        format!("{:+.1}% ({:+.0}%)", delta, percent)
+    } else {
+        format!("{:+.1}%", delta)
+    }
+}
+
+fn provider_display_name(provider_id: &str) -> String {
+    ProviderId::from_str(provider_id)
+        .map(|id| id.display_name().to_string())
+        .unwrap_or_else(|_| provider_id.to_string())
+}
+
+fn format_history_range_label(start: Date, end: Date, range_days: u32) -> String {
+    let start_label = format_history_day(start);
+    let end_label = format_history_day(end);
+    format!("Last {range_days} days · {start_label}–{end_label}")
+}
+
+fn format_history_day(date: Date) -> String {
+    let format = time::format_description::parse("[month repr:short] [day padding:zero]").ok();
+    if let Some(format) = format {
+        if let Ok(text) = date.format(&format) {
+            return text;
+        }
+    }
+    date.to_string()
 }
 
 fn render_preview_provider_card(

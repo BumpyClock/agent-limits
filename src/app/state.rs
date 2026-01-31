@@ -43,6 +43,8 @@ pub(crate) struct AgentStatsApp {
     pub(crate) preview_active_provider: Option<ProviderId>,
     pub(crate) main_scroll_handle: ScrollHandle,
     pub(crate) pending_main_provider_focus: Option<ProviderId>,
+    pub(crate) history_range_days: u32,
+    pub(crate) history_scroll_handle: ScrollHandle,
 }
 
 impl AgentStatsApp {
@@ -101,6 +103,8 @@ impl AgentStatsApp {
             preview_active_provider,
             main_scroll_handle: ScrollHandle::new(),
             pending_main_provider_focus,
+            history_range_days: 30,
+            history_scroll_handle: ScrollHandle::new(),
         };
         if view_mode != AppViewMode::Settings {
             app.schedule_refresh_loop(cx);

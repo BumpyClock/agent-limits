@@ -59,6 +59,10 @@ pub fn run() {
             open_or_create_settings_window(cx);
             cx.stop_propagation();
         });
+        cx.on_action(|_: &OpenHistory, cx| {
+            open_or_create_history_window(cx);
+            cx.stop_propagation();
+        });
         cx.on_action(|_: &Refresh, cx| {
             let handled = update_active_app(cx, |app, _window, cx| {
                 app.refresh_now(cx);
@@ -105,13 +109,14 @@ pub(crate) const APP_TITLE: &str = "Agent Stats";
 pub(crate) const APP_ID: &str = "com.agentstats.app";
 pub(crate) const KEY_CONTEXT: &str = "AgentStats";
 
-actions!(agent_stats, [About, Quit, OpenSettings, Refresh, Minimize, Zoom, Hide, HideOthers, ShowAll]);
+actions!(agent_stats, [About, Quit, OpenSettings, OpenHistory, Refresh, Minimize, Zoom, Hide, HideOthers, ShowAll]);
 
 fn app_menus() -> Vec<Menu> {
     let mut app_items = vec![
         MenuItem::action(format!("About {APP_TITLE}"), About),
         MenuItem::separator(),
         MenuItem::action("Settings...", OpenSettings),
+        MenuItem::action("History...", OpenHistory),
         MenuItem::action("Refresh", Refresh),
         MenuItem::separator(),
     ];
@@ -196,6 +201,18 @@ pub(crate) fn open_or_create_settings_window(cx: &mut App) {
     create_settings_window(cx);
 }
 
+pub(crate) fn open_or_create_history_window(cx: &mut App) {
+    if let Some(window_handle) = find_window_by_mode(cx, AppViewMode::History) {
+        let _ = cx.update_window(window_handle, |_root, window, _cx| {
+            window.activate_window();
+        });
+        cx.activate(true);
+        return;
+    }
+
+    create_history_window(cx);
+}
+
 pub(crate) fn sync_windows_after_settings_change(
     current_mode: AppViewMode,
     settings: crate::settings::AppSettings,
@@ -206,6 +223,7 @@ pub(crate) fn sync_windows_after_settings_change(
         AppViewMode::Main,
         AppViewMode::Preview,
         AppViewMode::Settings,
+        AppViewMode::History,
     ];
     for mode in modes {
         if mode == current_mode {
@@ -276,6 +294,31 @@ fn create_settings_window(cx: &mut App) {
         window.activate_window();
         window.set_window_title("Settings");
         let app = cx.new(|cx| AgentStatsApp::new(window, AppViewMode::Settings, None, cx));
+        cx.new(|cx| Root::new(app, window, cx))
+    });
+
+    if result.is_ok() {
+        cx.activate(true);
+    }
+}
+
+fn create_history_window(cx: &mut App) {
+    let window_options = WindowOptions {
+        window_bounds: Some(WindowBounds::centered(size(px(860.0), px(640.0)), cx)),
+        titlebar: Some(TitlebarOptions {
+            title: Some("History".into()),
+            appears_transparent: false,
+            traffic_light_position: Some(point(px(16.0), px(16.0))),
+        }),
+        app_id: Some(APP_ID.to_string()),
+        window_decorations: Some(WindowDecorations::Server),
+        ..Default::default()
+    };
+
+    let result = cx.open_window(window_options, |window, cx| {
+        window.activate_window();
+        window.set_window_title("History");
+        let app = cx.new(|cx| AgentStatsApp::new(window, AppViewMode::History, None, cx));
         cx.new(|cx| Root::new(app, window, cx))
     });
 

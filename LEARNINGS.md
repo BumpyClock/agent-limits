@@ -100,6 +100,10 @@
   What I tried: Added gpui-component Skeleton rows for the usage section when refreshing without a snapshot.
   Outcome: Provider cards now show loading placeholders while data fetches.
   Next time: Keep skeletons scoped to the usage section so headers remain readable.
+- Context: Added history/analytics view for provider trends.
+  What I tried: Aggregated per-provider daily usage averages from stored snapshots, added range selection and period deltas, and guarded history env var tests with a mutex.
+  Outcome: History window renders daily aggregates with totals/averages/deltas; tests pass without env var races.
+  Next time: Lock global env vars in tests that run in parallel.
 - Context: Main window needed a radical, glanceable redesign.
   What I tried: Rebuilt the header, added a glance strip, standardized card layout/typography, and added minimal fade animations for updates.
   Outcome: The main window now presents summaries first with consistent card hierarchy and motion polish.
