@@ -52,20 +52,8 @@ pub fn run() {
         ]);
         cx.on_action(|_: &Quit, cx| cx.quit());
         cx.on_action(|_: &OpenSettings, cx| {
-            let handled = update_active_app(cx, |app, _window, cx| {
-                app.toggle_settings(cx);
-            });
-            if handled.is_none() {
-                create_main_window(cx, None);
-            }
-            let handled = handled.or_else(|| {
-                update_active_app(cx, |app, _window, cx| {
-                    app.toggle_settings(cx);
-                })
-            });
-            if handled.is_some() {
-                cx.stop_propagation();
-            }
+            open_or_create_settings_window(cx);
+            cx.stop_propagation();
         });
         cx.on_action(|_: &Refresh, cx| {
             let handled = update_active_app(cx, |app, _window, cx| {
@@ -181,7 +169,6 @@ fn open_or_create_main_window(cx: &mut App) {
 
 pub(crate) fn open_main_window_for_provider(provider_id: ProviderId, cx: &mut App) {
     let handled = update_app_by_mode(cx, AppViewMode::Main, |app, window, cx| {
-        app.show_settings = false;
         app.pending_main_provider_focus = Some(provider_id);
         cx.notify();
         window.activate_window();
@@ -190,6 +177,41 @@ pub(crate) fn open_main_window_for_provider(provider_id: ProviderId, cx: &mut Ap
         create_main_window(cx, Some(provider_id));
     } else {
         cx.activate(true);
+    }
+}
+
+pub(crate) fn open_or_create_settings_window(cx: &mut App) {
+    if let Some(window_handle) = find_window_by_mode(cx, AppViewMode::Settings) {
+        let _ = cx.update_window(window_handle, |_root, window, _cx| {
+            window.activate_window();
+        });
+        cx.activate(true);
+        return;
+    }
+
+    create_settings_window(cx);
+}
+
+pub(crate) fn sync_windows_after_settings_change(
+    current_mode: AppViewMode,
+    settings: crate::settings::AppSettings,
+    config: agent_stats_core::config::AppConfig,
+    cx: &mut App,
+) {
+    let modes = [
+        AppViewMode::Main,
+        AppViewMode::Preview,
+        AppViewMode::Settings,
+    ];
+    for mode in modes {
+        if mode == current_mode {
+            continue;
+        }
+        let settings = settings.clone();
+        let config = config.clone();
+        let _ = update_app_by_mode(cx, mode, |app, window, cx| {
+            app.apply_state_update(settings, config, window, cx);
+        });
     }
 }
 
@@ -228,6 +250,31 @@ fn create_main_window(cx: &mut App, initial_provider: Option<ProviderId>) {
         let app = cx.new(|cx| AgentStatsApp::new(window, AppViewMode::Main, initial_provider, cx));
         cx.new(|cx| Root::new(app, window, cx))
     });
+    if result.is_ok() {
+        cx.activate(true);
+    }
+}
+
+fn create_settings_window(cx: &mut App) {
+    let window_options = WindowOptions {
+        window_bounds: Some(WindowBounds::centered(size(px(720.0), px(580.0)), cx)),
+        titlebar: Some(TitlebarOptions {
+            title: Some("Settings".into()),
+            appears_transparent: false,
+            traffic_light_position: Some(point(px(16.0), px(16.0))),
+        }),
+        app_id: Some(APP_ID.to_string()),
+        window_decorations: Some(WindowDecorations::Server),
+        ..Default::default()
+    };
+
+    let result = cx.open_window(window_options, |window, cx| {
+        window.activate_window();
+        window.set_window_title("Settings");
+        let app = cx.new(|cx| AgentStatsApp::new(window, AppViewMode::Settings, None, cx));
+        cx.new(|cx| Root::new(app, window, cx))
+    });
+
     if result.is_ok() {
         cx.activate(true);
     }

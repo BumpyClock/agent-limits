@@ -58,9 +58,10 @@
         "No settings UI remains in main window"
       ],
       "priority": 4,
-      "passes": false,
+      "passes": true,
       "labels": [],
-      "dependsOn": []
+      "dependsOn": [],
+      "completionNotes": "Completed by agent"
     },
     {
       "id": "US-005",
@@ -124,6 +125,6 @@
     "createdAt": "2026-01-31T02:58:06.670Z",
     "version": "1.0.0",
     "sourcePrd": "prd.md",
-    "updatedAt": "2026-01-31T03:57:19.333Z"
+    "updatedAt": "2026-01-31T04:11:54.711Z"
   }
 }

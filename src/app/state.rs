@@ -31,7 +31,6 @@ pub(crate) struct AgentStatsApp {
     pub(crate) refreshing: bool,
     pub(crate) error: Option<String>,
     pub(crate) refresh_task: Option<Task<()>>,
-    pub(crate) show_settings: bool,
     pub(crate) copilot_device_flow: CopilotDeviceFlowState,
     pub(crate) copilot_device_flow_task: Option<Task<()>>,
     pub(crate) needs_form_rebuild: bool,
@@ -81,7 +80,6 @@ impl AgentStatsApp {
             refreshing: false,
             error: None,
             refresh_task: None,
-            show_settings: false,
             copilot_device_flow: CopilotDeviceFlowState::Idle,
             copilot_device_flow_task: None,
             needs_form_rebuild: false,
@@ -90,9 +88,42 @@ impl AgentStatsApp {
             main_scroll_handle: ScrollHandle::new(),
             pending_main_provider_focus,
         };
-        app.schedule_refresh_loop(cx);
-        app.refresh_now(cx);
+        if view_mode != AppViewMode::Settings {
+            app.schedule_refresh_loop(cx);
+            app.refresh_now(cx);
+        }
         app
+    }
+
+    pub(crate) fn apply_state_update(
+        &mut self,
+        settings: AppSettings,
+        config: AppConfig,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.settings = settings;
+        self.config = config;
+        self.providers = build_provider_states(&self.config);
+        self.provider_forms = build_provider_forms(&self.config, window, cx);
+        self.token_account_forms = build_token_account_forms(&self.config, window, cx);
+        if self.view_mode == AppViewMode::Preview {
+            self.preview_active_provider = self
+                .providers
+                .iter()
+                .find(|provider| {
+                    provider
+                        .config
+                        .enabled
+                        .unwrap_or(provider.metadata.default_enabled)
+                })
+                .map(|provider| provider.config.id);
+        }
+        if self.view_mode != AppViewMode::Settings {
+            self.schedule_refresh_loop(cx);
+            self.refresh_now(cx);
+        }
+        cx.notify();
     }
 
     fn schedule_refresh_loop(&mut self, cx: &mut Context<Self>) {
@@ -192,17 +223,20 @@ impl AgentStatsApp {
         }
     }
 
-    pub(crate) fn toggle_settings(&mut self, cx: &mut Context<Self>) {
-        self.show_settings = !self.show_settings;
-        cx.notify();
-    }
-
     pub(crate) fn update_setting(&mut self, settings: AppSettings, cx: &mut Context<Self>) {
         self.settings = settings;
         if let Err(error) = self.settings.save() {
             log::error!("Failed to save settings: {error}");
         }
-        self.schedule_refresh_loop(cx);
+        if self.view_mode != AppViewMode::Settings {
+            self.schedule_refresh_loop(cx);
+        }
+        super::sync_windows_after_settings_change(
+            self.view_mode,
+            self.settings.clone(),
+            self.config.clone(),
+            cx,
+        );
         cx.notify();
     }
 
@@ -487,8 +521,16 @@ impl AgentStatsApp {
             log::error!("Failed to save config: {error}");
         } else {
             self.providers = build_provider_states(&self.config);
-            self.refresh_now(cx);
+            if self.view_mode != AppViewMode::Settings {
+                self.refresh_now(cx);
+            }
         }
+        super::sync_windows_after_settings_change(
+            self.view_mode,
+            self.settings.clone(),
+            self.config.clone(),
+            cx,
+        );
         cx.notify();
     }
 

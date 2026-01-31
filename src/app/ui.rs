@@ -39,7 +39,7 @@ impl Render for AgentStatsApp {
 
         let content: AnyElement = if self.view_mode == AppViewMode::Preview {
             render_preview(self, cx)
-        } else if self.show_settings {
+        } else if self.view_mode == AppViewMode::Settings {
             render_settings(self, cx)
         } else {
             let now = OffsetDateTime::now_utc();
@@ -67,8 +67,8 @@ impl Render for AgentStatsApp {
                                         })),
                                 )
                                 .child(Button::new("settings").label("Settings").on_click(
-                                    cx.listener(|app, _event, _window, cx| {
-                                        app.toggle_settings(cx);
+                                    cx.listener(|_app, _event, _window, cx| {
+                                        super::open_or_create_settings_window(cx);
                                     }),
                                 )),
                         ),
@@ -147,8 +147,8 @@ impl Render for AgentStatsApp {
         div()
             .size_full()
             .key_context(KEY_CONTEXT)
-            .on_action(cx.listener(|app, _: &OpenSettings, _window, cx| {
-                app.toggle_settings(cx);
+            .on_action(cx.listener(|_app, _: &OpenSettings, _window, cx| {
+                super::open_or_create_settings_window(cx);
             }))
             .on_action(cx.listener(|app, _: &Refresh, _window, cx| {
                 app.refresh_now(cx);
@@ -170,13 +170,7 @@ fn render_settings(app: &mut AgentStatsApp, cx: &mut Context<AgentStatsApp>) -> 
     let settings_header = div()
         .flex()
         .items_center()
-        .justify_between()
-        .child(Label::new("Settings").text_lg())
-        .child(Button::new("back").label("Back").on_click(cx.listener(
-            |app, _event, _window, cx| {
-                app.toggle_settings(cx);
-            },
-        )));
+        .child(Label::new("Settings").text_lg());
 
     let cadence_buttons = div().flex().gap(px(8.0)).children(
         [
@@ -358,7 +352,7 @@ fn render_preview(app: &mut AgentStatsApp, cx: &mut Context<AgentStatsApp>) -> A
 
     let provider_ids_for_click = provider_ids.clone();
     let tabs = TabBar::new("preview-tabs")
-        .w_full()
+        .flex_1()
         .underline()
         .with_size(Size::Small)
         .selected_index(active_index)
@@ -373,6 +367,18 @@ fn render_preview(app: &mut AgentStatsApp, cx: &mut Context<AgentStatsApp>) -> A
             enabled_providers
                 .iter()
                 .map(|provider| Tab::new().label(provider.metadata.display_name)),
+        );
+
+    let preview_actions = div()
+        .flex()
+        .items_center()
+        .gap(px(6.0))
+        .child(
+            Button::new("preview-settings")
+                .label("Settings")
+                .on_click(cx.listener(|_app, _event, _window, cx| {
+                    super::open_or_create_settings_window(cx);
+                })),
         );
 
     let selected_provider = active_provider.and_then(|provider_id| {
@@ -400,7 +406,14 @@ fn render_preview(app: &mut AgentStatsApp, cx: &mut Context<AgentStatsApp>) -> A
         .gap(px(10.0))
         .paddings(px(12.0))
         .overflow_y_scrollbar()
-        .child(tabs)
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .child(tabs)
+                .child(preview_actions),
+        )
         .child(body)
         .into_any_element()
 }

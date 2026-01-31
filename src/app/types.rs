@@ -53,4 +53,5 @@ pub(crate) enum CopilotDeviceFlowState {
 pub(crate) enum AppViewMode {
     Main,
     Preview,
+    Settings,
 }
