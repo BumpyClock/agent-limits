@@ -4,8 +4,9 @@ mod types;
 mod ui;
 
 use gpui::{
-    App, AppContext, Application, KeyBinding, Menu, MenuItem, SystemMenuType, TitlebarOptions,
-    WindowBounds, WindowDecorations, WindowOptions, actions, point, px, size,
+    App, AppContext, Application, Context, KeyBinding, Menu, MenuItem, SystemMenuType,
+    TitlebarOptions, Window, WindowBounds, WindowDecorations, WindowOptions, actions, point, px,
+    size,
 };
 use gpui_component::Root;
 
@@ -45,6 +46,54 @@ pub fn run() {
             KeyBinding::new("ctrl-r", Refresh, Some(KEY_CONTEXT)),
         ]);
         cx.on_action(|_: &Quit, cx| cx.quit());
+        cx.on_action(|_: &OpenSettings, cx| {
+            let handled = update_active_app(cx, |app, _window, cx| {
+                app.toggle_settings(cx);
+            });
+            if handled.is_none() {
+                create_main_window(cx);
+            }
+            let handled = handled.or_else(|| {
+                update_active_app(cx, |app, _window, cx| {
+                    app.toggle_settings(cx);
+                })
+            });
+            if handled.is_some() {
+                cx.stop_propagation();
+            }
+        });
+        cx.on_action(|_: &Refresh, cx| {
+            let handled = update_active_app(cx, |app, _window, cx| {
+                app.refresh_now(cx);
+            });
+            if handled.is_none() {
+                create_main_window(cx);
+            }
+            let handled = handled.or_else(|| {
+                update_active_app(cx, |app, _window, cx| {
+                    app.refresh_now(cx);
+                })
+            });
+            if handled.is_some() {
+                cx.stop_propagation();
+            }
+        });
+        cx.on_action(|_: &About, cx| {
+            let handled = update_active_app(cx, |app, window, cx| {
+                app.open_about_dialog(window, cx);
+            });
+            if handled.is_none() {
+                create_main_window(cx);
+            }
+            let handled = handled.or_else(|| {
+                update_active_app(cx, |app, window, cx| {
+                    app.open_about_dialog(window, cx);
+                })
+            });
+            if handled.is_some() {
+                cx.stop_propagation();
+            }
+        });
         #[cfg(target_os = "macos")]
         {
             cx.on_action(|_: &Hide, cx| cx.hide());
@@ -93,6 +142,27 @@ fn app_menus() -> Vec<Menu> {
             ],
         },
     ]
+}
+
+fn update_active_app<R>(
+    cx: &mut App,
+    update: impl FnOnce(&mut AgentStatsApp, &mut Window, &mut Context<AgentStatsApp>) -> R,
+) -> Option<R> {
+    let window_handle = cx.active_window().or_else(|| cx.windows().first().copied())?;
+    cx.update_window(window_handle, |root_view, window, cx| {
+        let root_entity = match root_view.downcast::<Root>() {
+            Ok(entity) => entity,
+            Err(_) => return None,
+        };
+        let app_view = root_entity.read(cx).view().clone();
+        let app_entity = match app_view.downcast::<AgentStatsApp>() {
+            Ok(entity) => entity,
+            Err(_) => return None,
+        };
+        Some(app_entity.update(cx, |app, cx| update(app, window, cx)))
+    })
+    .ok()
+    .flatten()
 }
 
 fn create_main_window(cx: &mut App) {

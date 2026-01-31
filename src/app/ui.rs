@@ -951,9 +951,10 @@ fn render_rate_window(
         window.reset_description.as_deref(),
     );
 
+    let bar_color = accent.blend(cx.theme().foreground.opacity(0.35));
     let bar = Progress::new(format!("bar-{}-{label}", percent as u64))
         .value(percent as f32)
-        .color(accent);
+        .color(bar_color);
 
     div()
         .flex()
