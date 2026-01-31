@@ -108,6 +108,10 @@
   What I tried: Added app menus, keybindings, reopen handling, and explicit titlebar/window options (app id, decorations, title).
   Outcome: The app now shows a proper titlebar, menus, and consistent reopen behavior on macOS, Windows, and Linux.
   Next time: Use AppContext + menu setup early in `run()` for lifecycle polish.
+- Context: Settings window needed a visual refresh for faster scanning.
+  What I tried: Introduced carded sections with titles/captions, refreshed header hierarchy, wrapped refresh cadence buttons, and turned provider toggles into bordered rows.
+  Outcome: Settings layout reads as clear sections while preserving existing behavior.
+  Next time: Use shared section header helpers to keep settings styling consistent.
 - Context: Needed programmatic scrolling and click handling on Div elements.
   What I tried: Called `track_scroll` and `on_click` directly on `Div`.
   Outcome: Compile errors because those helpers require `Stateful` elements.

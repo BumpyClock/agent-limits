@@ -3,10 +3,10 @@
   "sessionId": "91628096-f51c-418f-91fd-0dc343388ecc",
   "status": "running",
   "startedAt": "2026-01-31T03:00:01.068Z",
-  "updatedAt": "2026-01-31T04:11:54.714Z",
-  "currentIteration": 3,
+  "updatedAt": "2026-01-31T04:19:09.640Z",
+  "currentIteration": 4,
   "maxIterations": 10,
-  "tasksCompleted": 3,
+  "tasksCompleted": 4,
   "isPaused": false,
   "agentPlugin": "codex",
   "trackerState": {
@@ -35,8 +35,8 @@
       {
         "id": "US-004",
         "title": "Separate Settings Window",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "US-005",
@@ -94,6 +94,16 @@
       "durationMs": 870789,
       "startedAt": "2026-01-31T03:42:48.541Z",
       "endedAt": "2026-01-31T03:57:19.330Z"
+    },
+    {
+      "iteration": 4,
+      "status": "completed",
+      "taskId": "US-004",
+      "taskTitle": "Separate Settings Window",
+      "taskCompleted": true,
+      "durationMs": 873931,
+      "startedAt": "2026-01-31T03:57:20.778Z",
+      "endedAt": "2026-01-31T04:11:54.709Z"
     }
   ],
   "skippedTaskIds": [],

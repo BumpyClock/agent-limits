@@ -169,10 +169,16 @@ impl Render for AgentStatsApp {
 fn render_settings(app: &mut AgentStatsApp, cx: &mut Context<AgentStatsApp>) -> AnyElement {
     let settings_header = div()
         .flex()
-        .items_center()
-        .child(Label::new("Settings").text_lg());
+        .flex_col()
+        .gap(px(4.0))
+        .child(Label::new("Settings").text_lg().font_semibold())
+        .child(
+            Label::new("Tune refresh cadence, display, and provider access.")
+                .text_sm()
+                .text_color(cx.theme().muted_foreground),
+        );
 
-    let cadence_buttons = div().flex().gap(px(8.0)).children(
+    let cadence_buttons = div().flex().flex_wrap().gap(px(8.0)).children(
         [
             RefreshCadence::Manual,
             RefreshCadence::OneMinute,
@@ -231,49 +237,57 @@ fn render_settings(app: &mut AgentStatsApp, cx: &mut Context<AgentStatsApp>) -> 
         );
 
     let provider_count = app.providers.len();
-    let provider_toggles =
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(8.0))
-            .children(app.providers.iter().enumerate().map(|(index, provider)| {
-                let enabled = provider
-                    .config
-                    .enabled
-                    .unwrap_or(provider.metadata.default_enabled);
-                let provider_id = provider.config.id;
-                let is_first = index == 0;
-                let is_last = index.saturating_add(1) >= provider_count;
+    let provider_toggles = div()
+        .flex()
+        .flex_col()
+        .gap(px(8.0))
+        .children(app.providers.iter().enumerate().map(|(index, provider)| {
+            let enabled = provider
+                .config
+                .enabled
+                .unwrap_or(provider.metadata.default_enabled);
+            let provider_id = provider.config.id;
+            let is_first = index == 0;
+            let is_last = index.saturating_add(1) >= provider_count;
 
-                let toggle = Checkbox::new(format!("provider-{}", provider_id))
-                    .label(provider.metadata.display_name)
-                    .checked(enabled)
-                    .on_click(cx.listener(move |app, checked, _window, cx| {
-                        app.update_provider_enabled(provider_id, *checked, cx);
-                    }));
+            let toggle = Checkbox::new(format!("provider-{}", provider_id))
+                .label(provider.metadata.display_name)
+                .checked(enabled)
+                .on_click(cx.listener(move |app, checked, _window, cx| {
+                    app.update_provider_enabled(provider_id, *checked, cx);
+                }));
 
-                let move_up = Button::new(format!("provider-{}-up", provider_id))
-                    .label("Up")
-                    .disabled(is_first)
-                    .on_click(cx.listener(move |app, _event, _window, cx| {
-                        app.move_provider(provider_id, ProviderMoveDirection::Up, cx);
-                    }));
+            let move_up = Button::new(format!("provider-{}-up", provider_id))
+                .label("Up")
+                .disabled(is_first)
+                .on_click(cx.listener(move |app, _event, _window, cx| {
+                    app.move_provider(provider_id, ProviderMoveDirection::Up, cx);
+                }));
 
-                let move_down = Button::new(format!("provider-{}-down", provider_id))
-                    .label("Down")
-                    .disabled(is_last)
-                    .on_click(cx.listener(move |app, _event, _window, cx| {
-                        app.move_provider(provider_id, ProviderMoveDirection::Down, cx);
-                    }));
+            let move_down = Button::new(format!("provider-{}-down", provider_id))
+                .label("Down")
+                .disabled(is_last)
+                .on_click(cx.listener(move |app, _event, _window, cx| {
+                    app.move_provider(provider_id, ProviderMoveDirection::Down, cx);
+                }));
 
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .child(toggle)
-                    .child(move_up)
-                    .child(move_down)
-            }));
+            let reorder_controls = div()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .child(move_up)
+                .child(move_down);
+
+            div()
+                .rounded_md()
+                .border_1()
+                .paddings(px(8.0))
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(toggle)
+                .child(reorder_controls)
+        }));
 
     let provider_settings_cards: Vec<AnyElement> = app
         .providers
@@ -288,6 +302,27 @@ fn render_settings(app: &mut AgentStatsApp, cx: &mut Context<AgentStatsApp>) -> 
         .gap(px(12.0))
         .children(provider_settings_cards);
 
+    let cadence_section = render_settings_section(
+        "Refresh cadence",
+        Some("How often Agent Limits refreshes usage in the background."),
+        cadence_buttons.into_any_element(),
+        cx,
+    );
+
+    let display_section = render_settings_section(
+        "Display",
+        Some("Customize how usage and status details appear."),
+        toggles.into_any_element(),
+        cx,
+    );
+
+    let provider_section = render_settings_section(
+        "Providers",
+        Some("Enable providers and control their order."),
+        provider_toggles.into_any_element(),
+        cx,
+    );
+
     div()
         .size_full()
         .flex()
@@ -296,15 +331,16 @@ fn render_settings(app: &mut AgentStatsApp, cx: &mut Context<AgentStatsApp>) -> 
         .paddings(px(16.0))
         .overflow_y_scrollbar()
         .child(settings_header)
-        .child(div().child(Label::new("Refresh cadence")))
-        .child(cadence_buttons)
-        .child(div().child(Label::new("Display")))
-        .child(toggles)
-        .child(div().child(Label::new("Providers")))
-        .child(provider_toggles)
+        .child(cadence_section)
+        .child(display_section)
+        .child(provider_section)
         .when(has_provider_settings, |this| {
-            this.child(div().child(Label::new("Provider settings")))
-                .child(provider_settings)
+            this.child(render_settings_group_header(
+                "Provider settings",
+                Some("Credentials and options for specific providers."),
+                cx,
+            ))
+            .child(provider_settings)
         })
         .into_any_element()
 }
@@ -480,6 +516,7 @@ fn render_provider_settings_card(
                 .mask_toggle()
                 .cleanable(true)
                 .flex_1(),
+            cx,
         ))
     } else {
         None
@@ -492,6 +529,7 @@ fn render_provider_settings_card(
                 .mask_toggle()
                 .cleanable(true)
                 .flex_1(),
+            cx,
         ))
     } else {
         None
@@ -501,6 +539,7 @@ fn render_provider_settings_card(
         Some(render_settings_input(
             "Region",
             Input::new(&form.region).cleanable(true).flex_1(),
+            cx,
         ))
     } else {
         None
@@ -510,6 +549,7 @@ fn render_provider_settings_card(
         Some(render_settings_input(
             "Workspace ID",
             Input::new(&form.workspace_id).cleanable(true).flex_1(),
+            cx,
         ))
     } else {
         None
@@ -527,6 +567,7 @@ fn render_provider_settings_card(
         div()
             .rounded_lg()
             .border_1()
+            .bg(cx.theme().secondary.opacity(0.35))
             .paddings(px(12.0))
             .flex()
             .flex_col()
@@ -755,6 +796,7 @@ fn render_token_accounts_section(
         .child(render_settings_input(
             "Label",
             Input::new(&form.label).cleanable(true).flex_1(),
+            cx,
         ))
         .child(render_settings_input(
             "Token",
@@ -762,6 +804,7 @@ fn render_token_accounts_section(
                 .mask_toggle()
                 .cleanable(true)
                 .flex_1(),
+            cx,
         ))
         .child(
             div()
@@ -797,13 +840,53 @@ fn token_accounts_header(support: &TokenAccountSupport) -> AnyElement {
         .into_any_element()
 }
 
-fn render_settings_input(label: &str, input: Input) -> AnyElement {
+fn render_settings_input(label: &str, input: Input, cx: &App) -> AnyElement {
     div()
         .flex()
         .flex_col()
         .gap(px(4.0))
-        .child(Label::new(label.to_string()).text_sm())
+        .child(
+            Label::new(label.to_string())
+                .text_sm()
+                .text_color(cx.theme().muted_foreground),
+        )
         .child(input)
+        .into_any_element()
+}
+
+fn render_settings_section(
+    title: &str,
+    caption: Option<&str>,
+    content: AnyElement,
+    cx: &App,
+) -> AnyElement {
+    div()
+        .rounded_lg()
+        .border_1()
+        .bg(cx.theme().secondary.opacity(0.35))
+        .paddings(px(14.0))
+        .flex()
+        .flex_col()
+        .gap(px(12.0))
+        .child(render_settings_group_header(title, caption, cx))
+        .child(content)
+        .into_any_element()
+}
+
+fn render_settings_group_header(title: &str, caption: Option<&str>, cx: &App) -> AnyElement {
+    let caption = caption.map(|text| text.to_string());
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(2.0))
+        .child(Label::new(title.to_string()).text_sm().font_semibold())
+        .when_some(caption, |this, caption| {
+            this.child(
+                Label::new(caption)
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground),
+            )
+        })
         .into_any_element()
 }
 
