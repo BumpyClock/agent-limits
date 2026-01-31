@@ -1,0 +1,127 @@
+{
+  "name": "Agent Limits - Menubar/Tray + Settings Window + Alerts + History",
+  "description": "Add macOS menubar app + Windows tray app with minimal preview (CodexBar-style), split Settings into separate window with visual refresh, and add alerts + history/analytics. Data sources unchanged. Target: power users with many providers.",
+  "branchName": "main",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Menubar/Tray App Shell",
+      "description": "As a power user, I want a menubar (macOS) / tray (Windows) app entry so I can access limits quickly.",
+      "acceptanceCriteria": [
+        "macOS: app exposes menubar icon and can run without main window visible",
+        "Windows: app exposes tray icon with toggle for preview window",
+        "Main window can still be opened from menu/tray"
+      ],
+      "priority": 1,
+      "passes": true,
+      "labels": [],
+      "dependsOn": [],
+      "completionNotes": "Completed by agent"
+    },
+    {
+      "id": "US-002",
+      "title": "Minimal Preview UI (CodexBar-style)",
+      "description": "As a power user, I want a compact preview that mirrors CodexBar so I can scan limits quickly.",
+      "acceptanceCriteria": [
+        "Preview uses multi-provider tabs for configured providers",
+        "Each tab shows current limits in compact layout similar to reference image",
+        "Tabs overflow/scroll when many providers configured",
+        "No editing or settings controls inside preview (read-only)"
+      ],
+      "priority": 2,
+      "passes": false,
+      "labels": [],
+      "dependsOn": []
+    },
+    {
+      "id": "US-003",
+      "title": "Preview Interactions -> Main Window",
+      "description": "As a power user, I want preview interactions to open the full app so I can act on details.",
+      "acceptanceCriteria": [
+        "Clicking a provider tab or limit row opens main window (or focuses if already open)",
+        "Main window opens on the selected provider context"
+      ],
+      "priority": 3,
+      "passes": false,
+      "labels": [],
+      "dependsOn": []
+    },
+    {
+      "id": "US-004",
+      "title": "Separate Settings Window",
+      "description": "As a power user, I want Settings in a dedicated window so the main view stays focused.",
+      "acceptanceCriteria": [
+        "Existing Settings UI moved out of main window into a new Settings window",
+        "Settings window openable from app menu and from preview actions",
+        "No settings UI remains in main window"
+      ],
+      "priority": 4,
+      "passes": false,
+      "labels": [],
+      "dependsOn": []
+    },
+    {
+      "id": "US-005",
+      "title": "Settings Visual Refresh",
+      "description": "As a power user, I want a visually refreshed Settings window for faster scanning.",
+      "acceptanceCriteria": [
+        "Settings layout updated for clearer sectioning and hierarchy",
+        "Visual refresh does not change existing settings behavior",
+        "Matches overall app style (fonts, spacing, card styles)"
+      ],
+      "priority": 4,
+      "passes": false,
+      "labels": [],
+      "dependsOn": []
+    },
+    {
+      "id": "US-006",
+      "title": "Limit Alerts/Notifications",
+      "description": "As a power user, I want alerts when limits are near so I can avoid hitting caps.",
+      "acceptanceCriteria": [
+        "Add alert thresholds (global default + per-provider override)",
+        "Alert triggers when remaining percentage <= threshold for a limit window",
+        "OS notification delivered (macOS + Windows)",
+        "Cooldown prevents repeated notifications for same limit window"
+      ],
+      "priority": 4,
+      "passes": false,
+      "labels": [],
+      "dependsOn": []
+    },
+    {
+      "id": "US-007",
+      "title": "History Capture",
+      "description": "As a power user, I want history stored so I can review past usage.",
+      "acceptanceCriteria": [
+        "On each refresh, snapshot usage data for configured providers",
+        "Store snapshots locally with retention window (configurable or default)",
+        "No change to data-fetch sources"
+      ],
+      "priority": 4,
+      "passes": false,
+      "labels": [],
+      "dependsOn": []
+    },
+    {
+      "id": "US-008",
+      "title": "History / Analytics View",
+      "description": "As a power user, I want a history view so I can see trends over time.",
+      "acceptanceCriteria": [
+        "Add History view in main window or new view accessible from menu",
+        "Show per-provider daily aggregates for a selectable range (default 30 days)",
+        "Basic analytics: totals, averages, and deltas vs previous period"
+      ],
+      "priority": 4,
+      "passes": false,
+      "labels": [],
+      "dependsOn": []
+    }
+  ],
+  "metadata": {
+    "createdAt": "2026-01-31T02:58:06.670Z",
+    "version": "1.0.0",
+    "sourcePrd": "prd.md",
+    "updatedAt": "2026-01-31T03:25:01.546Z"
+  }
+}

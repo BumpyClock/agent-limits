@@ -1,22 +1,24 @@
 mod forms;
 mod state;
+mod tray;
 mod types;
 mod ui;
 
 use gpui::{
-    App, AppContext, Application, Context, KeyBinding, Menu, MenuItem, SystemMenuType,
+    App, AppContext, Application, Context, KeyBinding, Menu, MenuItem, QuitMode, SystemMenuType,
     TitlebarOptions, Window, WindowBounds, WindowDecorations, WindowOptions, actions, point, px,
     size,
 };
 use gpui_component::Root;
 
 use self::state::AgentStatsApp;
+use self::tray::TrayController;
 
 pub fn run() {
     let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .try_init();
 
-    let app = Application::new();
+    let app = Application::new().with_quit_mode(QuitMode::Explicit);
 
     app.on_reopen(|cx| {
         if cx.windows().is_empty() {
@@ -31,6 +33,7 @@ pub fn run() {
     app.run(|cx: &mut App| {
         gpui_component::init(cx);
         cx.set_menus(app_menus());
+        TrayController::init(cx);
         cx.bind_keys([
             #[cfg(target_os = "macos")]
             KeyBinding::new("cmd-q", Quit, Some(KEY_CONTEXT)),
@@ -163,6 +166,29 @@ fn update_active_app<R>(
     })
     .ok()
     .flatten()
+}
+
+fn open_or_create_main_window(cx: &mut App) {
+    let handled = update_active_app(cx, |_app, window, _cx| {
+        window.activate_window();
+    });
+    if handled.is_none() {
+        create_main_window(cx);
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn toggle_preview_window(cx: &mut App) {
+    let handled = update_active_app(cx, |_app, window, _cx| {
+        if window.is_window_active() {
+            window.minimize_window();
+        } else {
+            window.activate_window();
+        }
+    });
+    if handled.is_none() {
+        create_main_window(cx);
+    }
 }
 
 fn create_main_window(cx: &mut App) {

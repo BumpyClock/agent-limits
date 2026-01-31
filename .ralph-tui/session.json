@@ -1,0 +1,72 @@
+{
+  "version": 1,
+  "sessionId": "91628096-f51c-418f-91fd-0dc343388ecc",
+  "status": "running",
+  "startedAt": "2026-01-31T03:00:01.068Z",
+  "updatedAt": "2026-01-31T03:25:01.548Z",
+  "currentIteration": 0,
+  "maxIterations": 10,
+  "tasksCompleted": 0,
+  "isPaused": false,
+  "agentPlugin": "codex",
+  "trackerState": {
+    "plugin": "json",
+    "prdPath": "./prd.json",
+    "totalTasks": 8,
+    "tasks": [
+      {
+        "id": "US-001",
+        "title": "Menubar/Tray App Shell",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "US-002",
+        "title": "Minimal Preview UI (CodexBar-style)",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "US-003",
+        "title": "Preview Interactions -> Main Window",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "US-004",
+        "title": "Separate Settings Window",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "US-005",
+        "title": "Settings Visual Refresh",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "US-006",
+        "title": "Limit Alerts/Notifications",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "US-007",
+        "title": "History Capture",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "US-008",
+        "title": "History / Analytics View",
+        "status": "open",
+        "completedInSession": false
+      }
+    ]
+  },
+  "iterations": [],
+  "skippedTaskIds": [],
+  "cwd": "/Users/adityasharma/Projects/agent-limits",
+  "activeTaskIds": [],
+  "subagentPanelVisible": false
+}

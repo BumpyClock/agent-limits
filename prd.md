@@ -18,6 +18,8 @@ These commands must pass for every user story:
 For UI stories, also include:
 - Manual visual verification by user
 
+Read `spec.md` for full details.
+
 ## User Stories
 
 ### US-001: Menubar/Tray App Shell
