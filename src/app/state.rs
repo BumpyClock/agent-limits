@@ -17,6 +17,7 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::settings::AppSettings;
+use super::history;
 use super::forms::{build_provider_forms, build_token_account_forms};
 use super::types::{
     AppViewMode, CopilotDeviceFlowState, ProviderMoveDirection, ProviderSettingsForm,
@@ -207,27 +208,44 @@ impl AgentStatsApp {
             let mut cx = cx.clone();
             async move {
                 let result = task.await;
-                if let Err(error) = this.update(&mut cx, |app, cx| {
+                let history_request = match this.update(&mut cx, |app, cx| {
                     app.refreshing = false;
-                    match result {
+                    let history_request = match result {
                         Ok(fetch_result) => {
-                            let payload_map = fetch_result
-                                .payloads
-                                .into_iter()
+                            let payloads = fetch_result.payloads;
+                            let payload_map = payloads
+                                .iter()
+                                .cloned()
                                 .map(|payload| (payload.provider.clone(), payload))
                                 .collect::<HashMap<_, _>>();
                             app.update_payloads(payload_map);
                             super::alerts::handle_limit_alerts(&app.providers, &app.settings);
                             app.error = None;
                             app.last_refresh = Some(OffsetDateTime::now_utc());
+                            Some((payloads, app.settings.history_retention_days))
                         }
                         Err(error) => {
                             app.error = Some(error.to_string());
+                            None
                         }
-                    }
+                    };
                     cx.notify();
+                    history_request
                 }) {
-                    log::error!("Refresh result update failed: {error}");
+                    Ok(history_request) => history_request,
+                    Err(error) => {
+                        log::error!("Refresh result update failed: {error}");
+                        None
+                    }
+                };
+
+                if let Some((payloads, retention_days)) = history_request {
+                    let task = cx.background_spawn(async move {
+                        if let Err(error) = history::snapshot_usage(&payloads, retention_days) {
+                            log::error!("Failed to save history: {error}");
+                        }
+                    });
+                    task.detach();
                 }
             }
         })

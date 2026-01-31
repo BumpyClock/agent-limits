@@ -278,6 +278,7 @@ mod tests {
             show_absolute_reset: false,
             include_status: false,
             alert_threshold_percent: 10.0,
+            history_retention_days: 30,
         };
         let mut tracker = AlertTracker::default();
 

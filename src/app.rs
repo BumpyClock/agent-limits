@@ -1,5 +1,6 @@
 mod forms;
 mod alerts;
+mod history;
 mod notifications;
 mod state;
 mod tray;

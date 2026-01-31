@@ -100,6 +100,9 @@ serde_json.workspace = true
 time.workspace = true
 uuid.workspace = true
 
+[dev-dependencies]
+tempfile.workspace = true
+
 [target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
 image = { version = "0.25.6", default-features = false, features = ["png"] }
 tray-icon = { version = "0.21.3", default-features = false }

@@ -120,3 +120,7 @@
   What I tried: Added alert threshold settings, cooldown per limit window using reset/bucket identity, and OS notifications via notify-rust.
   Outcome: `cargo test -p agent-stats` passes with new alert logic tests.
   Next time: Use reset timestamps when available; window-minute buckets are fallback for cooldown identity.
+- Context: Added usage history capture and retention.
+  What I tried: Snapshotted provider payloads on refresh, stored in ~/.agent-stats/history.json with configurable retention, and trimmed on write; added a focused retention test.
+  Outcome: `cargo test -p agent-stats snapshots_are_trimmed_to_the_retention_window` passes.
+  Next time: Keep history I/O off the UI thread by background-spawning writes.

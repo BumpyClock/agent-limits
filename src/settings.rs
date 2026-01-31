@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 const DEFAULT_ALERT_THRESHOLD_PERCENT: f64 = 10.0;
+const DEFAULT_HISTORY_RETENTION_DAYS: u32 = 30;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -50,6 +51,8 @@ pub struct AppSettings {
     pub include_status: bool,
     #[serde(default = "default_alert_threshold_percent")]
     pub alert_threshold_percent: f64,
+    #[serde(default = "default_history_retention_days")]
+    pub history_retention_days: u32,
 }
 
 impl Default for AppSettings {
@@ -60,6 +63,7 @@ impl Default for AppSettings {
             show_absolute_reset: false,
             include_status: true,
             alert_threshold_percent: DEFAULT_ALERT_THRESHOLD_PERCENT,
+            history_retention_days: DEFAULT_HISTORY_RETENTION_DAYS,
         }
     }
 }
@@ -88,6 +92,10 @@ impl AppSettings {
 
 fn default_alert_threshold_percent() -> f64 {
     DEFAULT_ALERT_THRESHOLD_PERCENT
+}
+
+fn default_history_retention_days() -> u32 {
+    DEFAULT_HISTORY_RETENTION_DAYS
 }
 
 fn settings_path() -> PathBuf {

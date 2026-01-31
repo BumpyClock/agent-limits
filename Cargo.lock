@@ -45,6 +45,7 @@ dependencies = [
  "once_cell",
  "serde",
  "serde_json",
+ "tempfile",
  "time",
  "tray-icon",
  "uuid",
