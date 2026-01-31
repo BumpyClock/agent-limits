@@ -75,6 +75,7 @@ pub struct ProviderConfig {
     pub api_key: Option<String>,
     pub region: Option<String>,
     pub workspace_id: Option<String>,
+    pub alert_threshold_percent: Option<f64>,
     pub token_accounts: Option<TokenAccountData>,
 }
 
@@ -165,6 +166,7 @@ impl AppConfig {
                     api_key: None,
                     region: None,
                     workspace_id: None,
+                    alert_threshold_percent: None,
                     token_accounts: None,
                 });
             }
@@ -185,6 +187,7 @@ impl AppConfig {
                 api_key: None,
                 region: None,
                 workspace_id: None,
+                alert_threshold_percent: None,
                 token_accounts: None,
             })
             .collect();

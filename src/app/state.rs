@@ -5,8 +5,11 @@ use agent_stats_core::config::{
 use agent_stats_core::models::ProviderPayload;
 use agent_stats_core::provider_metadata::{ProviderId, ProviderMetadata, provider_metadata};
 use agent_stats_core::{DeviceFlowPollResult, poll_for_token, request_device_code};
-use gpui::{AppContext, AsyncApp, Context, ParentElement, ScrollHandle, Task, WeakEntity, Window};
+use gpui::{
+    AppContext, AsyncApp, Context, Entity, ParentElement, ScrollHandle, Task, WeakEntity, Window,
+};
 use gpui_component::label::Label;
+use gpui_component::input::InputState;
 use gpui_component::WindowExt;
 use std::collections::HashMap;
 use std::time::Duration as StdDuration;
@@ -27,6 +30,7 @@ pub(crate) struct AgentStatsApp {
     pub(crate) settings: AppSettings,
     pub(crate) provider_forms: HashMap<ProviderId, ProviderSettingsForm>,
     pub(crate) token_account_forms: HashMap<ProviderId, TokenAccountForm>,
+    pub(crate) alert_threshold_input: Entity<InputState>,
     pub(crate) last_refresh: Option<OffsetDateTime>,
     pub(crate) refreshing: bool,
     pub(crate) error: Option<String>,
@@ -55,6 +59,14 @@ impl AgentStatsApp {
         let providers = build_provider_states(&config);
         let provider_forms = build_provider_forms(&config, window, cx);
         let token_account_forms = build_token_account_forms(&config, window, cx);
+        let alert_threshold_text = format!("{:.0}", settings.alert_threshold_percent);
+        let alert_threshold_input = super::forms::build_input_state(
+            window,
+            cx,
+            Some(alert_threshold_text.as_str()),
+            "Default threshold (%)",
+            false,
+        );
         let preview_active_provider = providers
             .iter()
             .find(|provider| {
@@ -76,6 +88,7 @@ impl AgentStatsApp {
             settings,
             provider_forms,
             token_account_forms,
+            alert_threshold_input,
             last_refresh: None,
             refreshing: false,
             error: None,
@@ -107,6 +120,10 @@ impl AgentStatsApp {
         self.providers = build_provider_states(&self.config);
         self.provider_forms = build_provider_forms(&self.config, window, cx);
         self.token_account_forms = build_token_account_forms(&self.config, window, cx);
+        let alert_threshold_text = format!("{:.0}", self.settings.alert_threshold_percent);
+        self.alert_threshold_input.update(cx, |state, cx| {
+            state.set_value(&alert_threshold_text, window, cx);
+        });
         if self.view_mode == AppViewMode::Preview {
             self.preview_active_provider = self
                 .providers
@@ -200,6 +217,7 @@ impl AgentStatsApp {
                                 .map(|payload| (payload.provider.clone(), payload))
                                 .collect::<HashMap<_, _>>();
                             app.update_payloads(payload_map);
+                            super::alerts::handle_limit_alerts(&app.providers, &app.settings);
                             app.error = None;
                             app.last_refresh = Some(OffsetDateTime::now_utc());
                         }
@@ -331,16 +349,26 @@ impl AgentStatsApp {
             Some(workspace_text.to_string())
         };
 
+        let alert_threshold_value = form.alert_threshold_percent.read(cx).value();
         if let Some(provider) = self
             .config
             .providers
             .iter_mut()
             .find(|provider| provider.id == provider_id)
         {
+            let alert_threshold_result = parse_alert_threshold_percent(&alert_threshold_value);
             provider.api_key = api_key;
             provider.cookie_header = cookie_header.clone();
             provider.region = region;
             provider.workspace_id = workspace_id;
+            match alert_threshold_result {
+                Ok(alert_threshold_percent) => {
+                    provider.alert_threshold_percent = alert_threshold_percent;
+                }
+                Err(error) => {
+                    log::error!("Invalid alert threshold for {provider_id:?}: {error}");
+                }
+            }
             provider.cookie_source = if cookie_header.is_some() {
                 Some(ProviderCookieSource::Manual)
             } else {
@@ -354,6 +382,46 @@ impl AgentStatsApp {
         }
 
         self.persist_config_and_refresh(cx);
+    }
+
+    pub(crate) fn save_alert_settings(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let alert_threshold_value = self.alert_threshold_input.read(cx).value();
+        let alert_threshold_result = parse_alert_threshold_percent(&alert_threshold_value);
+        match alert_threshold_result {
+            Ok(Some(value)) => {
+                let mut settings = self.settings.clone();
+                settings.alert_threshold_percent = value;
+                self.update_setting(settings, cx);
+                let alert_threshold_text =
+                    format!("{:.0}", self.settings.alert_threshold_percent);
+                self.alert_threshold_input.update(cx, |state, cx| {
+                    state.set_value(&alert_threshold_text, window, cx);
+                });
+            }
+            Ok(None) => {
+                let mut settings = self.settings.clone();
+                settings.alert_threshold_percent =
+                    crate::settings::AppSettings::default().alert_threshold_percent;
+                self.update_setting(settings, cx);
+                let alert_threshold_text =
+                    format!("{:.0}", self.settings.alert_threshold_percent);
+                self.alert_threshold_input.update(cx, |state, cx| {
+                    state.set_value(&alert_threshold_text, window, cx);
+                });
+            }
+            Err(error) => {
+                log::error!("Invalid alert threshold: {error}");
+                let alert_threshold_text =
+                    format!("{:.0}", self.settings.alert_threshold_percent);
+                self.alert_threshold_input.update(cx, |state, cx| {
+                    state.set_value(&alert_threshold_text, window, cx);
+                });
+            }
+        }
     }
 
     pub(crate) fn add_token_account(
@@ -740,6 +808,24 @@ fn build_provider_states(config: &AppConfig) -> Vec<ProviderState> {
         .collect()
 }
 
+fn parse_alert_threshold_percent(value: &str) -> Result<Option<f64>, String> {
+    let trimmed_value = value.trim();
+    if trimmed_value.is_empty() {
+        return Ok(None);
+    }
+    let trimmed_value = trimmed_value.trim_end_matches('%').trim();
+    if trimmed_value.is_empty() {
+        return Ok(None);
+    }
+    let parsed_value: f64 = trimmed_value.parse().map_err(|_| {
+        "Alert threshold must be a number between 0 and 100".to_string()
+    })?;
+    if !parsed_value.is_finite() {
+        return Err("Alert threshold must be a finite number between 0 and 100".to_string());
+    }
+    Ok(Some(parsed_value.max(0.0).min(100.0)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{ProviderId, ProviderMoveDirection, move_provider_in_config};
@@ -757,6 +843,7 @@ mod tests {
                 api_key: None,
                 region: None,
                 workspace_id: None,
+                alert_threshold_percent: None,
                 token_accounts: None,
             })
             .collect();

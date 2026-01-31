@@ -18,6 +18,7 @@ pub(crate) struct ProviderSettingsForm {
     pub(crate) api_key: Entity<InputState>,
     pub(crate) region: Entity<InputState>,
     pub(crate) workspace_id: Entity<InputState>,
+    pub(crate) alert_threshold_percent: Entity<InputState>,
 }
 
 #[derive(Clone)]

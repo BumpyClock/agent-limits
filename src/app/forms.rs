@@ -44,6 +44,7 @@ pub(crate) struct ProviderSettingsSpec {
     pub(crate) show_api_key: bool,
     pub(crate) show_region: bool,
     pub(crate) show_workspace_id: bool,
+    pub(crate) show_alert_threshold: bool,
 }
 
 impl ProviderSettingsSpec {
@@ -53,6 +54,7 @@ impl ProviderSettingsSpec {
             || self.show_api_key
             || self.show_region
             || self.show_workspace_id
+            || self.show_alert_threshold
     }
 }
 
@@ -64,6 +66,7 @@ pub(crate) fn provider_settings_spec(provider_id: ProviderId) -> ProviderSetting
             show_api_key: false,
             show_region: false,
             show_workspace_id: false,
+            show_alert_threshold: true,
         },
         ProviderId::Claude => ProviderSettingsSpec {
             source_modes: SOURCE_MODES_AUTO_OAUTH_WEB_CLI,
@@ -71,6 +74,7 @@ pub(crate) fn provider_settings_spec(provider_id: ProviderId) -> ProviderSetting
             show_api_key: false,
             show_region: false,
             show_workspace_id: false,
+            show_alert_threshold: true,
         },
         ProviderId::Cursor => ProviderSettingsSpec {
             source_modes: SOURCE_MODES_AUTO_WEB,
@@ -78,6 +82,7 @@ pub(crate) fn provider_settings_spec(provider_id: ProviderId) -> ProviderSetting
             show_api_key: false,
             show_region: false,
             show_workspace_id: false,
+            show_alert_threshold: true,
         },
         ProviderId::OpenCode => ProviderSettingsSpec {
             source_modes: SOURCE_MODES_AUTO_WEB,
@@ -85,6 +90,7 @@ pub(crate) fn provider_settings_spec(provider_id: ProviderId) -> ProviderSetting
             show_api_key: false,
             show_region: false,
             show_workspace_id: true,
+            show_alert_threshold: true,
         },
         ProviderId::Factory => ProviderSettingsSpec {
             source_modes: SOURCE_MODES_AUTO_WEB,
@@ -92,6 +98,7 @@ pub(crate) fn provider_settings_spec(provider_id: ProviderId) -> ProviderSetting
             show_api_key: false,
             show_region: false,
             show_workspace_id: false,
+            show_alert_threshold: true,
         },
         ProviderId::Gemini => ProviderSettingsSpec {
             source_modes: SOURCE_MODES_AUTO_API_OAUTH,
@@ -99,6 +106,7 @@ pub(crate) fn provider_settings_spec(provider_id: ProviderId) -> ProviderSetting
             show_api_key: false,
             show_region: false,
             show_workspace_id: false,
+            show_alert_threshold: true,
         },
         ProviderId::Antigravity => ProviderSettingsSpec {
             source_modes: SOURCE_MODES_NONE,
@@ -106,6 +114,7 @@ pub(crate) fn provider_settings_spec(provider_id: ProviderId) -> ProviderSetting
             show_api_key: false,
             show_region: false,
             show_workspace_id: false,
+            show_alert_threshold: true,
         },
         ProviderId::Copilot => ProviderSettingsSpec {
             source_modes: SOURCE_MODES_AUTO_API,
@@ -113,6 +122,7 @@ pub(crate) fn provider_settings_spec(provider_id: ProviderId) -> ProviderSetting
             show_api_key: true,
             show_region: false,
             show_workspace_id: false,
+            show_alert_threshold: true,
         },
         ProviderId::Zai => ProviderSettingsSpec {
             source_modes: SOURCE_MODES_AUTO_API,
@@ -120,6 +130,7 @@ pub(crate) fn provider_settings_spec(provider_id: ProviderId) -> ProviderSetting
             show_api_key: true,
             show_region: false,
             show_workspace_id: false,
+            show_alert_threshold: true,
         },
         ProviderId::MiniMax => ProviderSettingsSpec {
             source_modes: SOURCE_MODES_AUTO_WEB_API,
@@ -127,6 +138,7 @@ pub(crate) fn provider_settings_spec(provider_id: ProviderId) -> ProviderSetting
             show_api_key: true,
             show_region: true,
             show_workspace_id: true,
+            show_alert_threshold: true,
         },
         ProviderId::Kimi => ProviderSettingsSpec {
             source_modes: SOURCE_MODES_AUTO_WEB_API,
@@ -134,6 +146,7 @@ pub(crate) fn provider_settings_spec(provider_id: ProviderId) -> ProviderSetting
             show_api_key: true,
             show_region: false,
             show_workspace_id: false,
+            show_alert_threshold: true,
         },
         ProviderId::Kiro => ProviderSettingsSpec {
             source_modes: SOURCE_MODES_AUTO_CLI,
@@ -141,6 +154,7 @@ pub(crate) fn provider_settings_spec(provider_id: ProviderId) -> ProviderSetting
             show_api_key: false,
             show_region: false,
             show_workspace_id: false,
+            show_alert_threshold: true,
         },
         ProviderId::VertexAI => ProviderSettingsSpec {
             source_modes: SOURCE_MODES_AUTO_API,
@@ -148,6 +162,7 @@ pub(crate) fn provider_settings_spec(provider_id: ProviderId) -> ProviderSetting
             show_api_key: false,
             show_region: false,
             show_workspace_id: false,
+            show_alert_threshold: true,
         },
         ProviderId::Augment => ProviderSettingsSpec {
             source_modes: SOURCE_MODES_AUTO_WEB,
@@ -155,6 +170,7 @@ pub(crate) fn provider_settings_spec(provider_id: ProviderId) -> ProviderSetting
             show_api_key: false,
             show_region: false,
             show_workspace_id: false,
+            show_alert_threshold: true,
         },
         ProviderId::JetBrains => ProviderSettingsSpec {
             source_modes: SOURCE_MODES_AUTO_WEB,
@@ -162,6 +178,7 @@ pub(crate) fn provider_settings_spec(provider_id: ProviderId) -> ProviderSetting
             show_api_key: false,
             show_region: false,
             show_workspace_id: false,
+            show_alert_threshold: true,
         },
         ProviderId::KimiK2 => ProviderSettingsSpec {
             source_modes: SOURCE_MODES_AUTO_API,
@@ -169,6 +186,7 @@ pub(crate) fn provider_settings_spec(provider_id: ProviderId) -> ProviderSetting
             show_api_key: true,
             show_region: false,
             show_workspace_id: false,
+            show_alert_threshold: true,
         },
         ProviderId::Amp => ProviderSettingsSpec {
             source_modes: SOURCE_MODES_AUTO_WEB,
@@ -176,6 +194,7 @@ pub(crate) fn provider_settings_spec(provider_id: ProviderId) -> ProviderSetting
             show_api_key: false,
             show_region: false,
             show_workspace_id: false,
+            show_alert_threshold: true,
         },
         ProviderId::Synthetic => ProviderSettingsSpec {
             source_modes: SOURCE_MODES_AUTO_API,
@@ -183,6 +202,7 @@ pub(crate) fn provider_settings_spec(provider_id: ProviderId) -> ProviderSetting
             show_api_key: true,
             show_region: false,
             show_workspace_id: false,
+            show_alert_threshold: true,
         },
     }
 }
@@ -204,6 +224,9 @@ pub(crate) fn build_provider_forms(
 ) -> HashMap<ProviderId, ProviderSettingsForm> {
     let mut forms = HashMap::new();
     for provider in &config.providers {
+        let alert_threshold_value = provider
+            .alert_threshold_percent
+            .map(|value| format!("{value:.0}"));
         let cookie_header = build_input_state(
             window,
             cx,
@@ -220,6 +243,13 @@ pub(crate) fn build_provider_forms(
             "Workspace ID",
             false,
         );
+        let alert_threshold_percent = build_input_state(
+            window,
+            cx,
+            alert_threshold_value.as_deref(),
+            "Default threshold (%)",
+            false,
+        );
         let source_mode = provider.source.clone().unwrap_or(ProviderSourceMode::Auto);
 
         forms.insert(
@@ -230,6 +260,7 @@ pub(crate) fn build_provider_forms(
                 api_key,
                 region,
                 workspace_id,
+                alert_threshold_percent,
             },
         );
     }
@@ -252,7 +283,7 @@ pub(crate) fn build_token_account_forms(
     forms
 }
 
-fn build_input_state(
+pub(crate) fn build_input_state(
     window: &mut Window,
     cx: &mut Context<AgentStatsApp>,
     value: Option<&str>,

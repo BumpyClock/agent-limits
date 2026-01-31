@@ -4,6 +4,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+const DEFAULT_ALERT_THRESHOLD_PERCENT: f64 = 10.0;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum RefreshCadence {
@@ -46,6 +48,8 @@ pub struct AppSettings {
     pub show_used: bool,
     pub show_absolute_reset: bool,
     pub include_status: bool,
+    #[serde(default = "default_alert_threshold_percent")]
+    pub alert_threshold_percent: f64,
 }
 
 impl Default for AppSettings {
@@ -55,6 +59,7 @@ impl Default for AppSettings {
             show_used: false,
             show_absolute_reset: false,
             include_status: true,
+            alert_threshold_percent: DEFAULT_ALERT_THRESHOLD_PERCENT,
         }
     }
 }
@@ -79,6 +84,10 @@ impl AppSettings {
         set_private_permissions(&path)?;
         Ok(())
     }
+}
+
+fn default_alert_threshold_percent() -> f64 {
+    DEFAULT_ALERT_THRESHOLD_PERCENT
 }
 
 fn settings_path() -> PathBuf {

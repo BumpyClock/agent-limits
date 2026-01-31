@@ -316,6 +316,33 @@ fn render_settings(app: &mut AgentStatsApp, cx: &mut Context<AgentStatsApp>) -> 
         cx,
     );
 
+    let alert_threshold_input = Input::new(&app.alert_threshold_input)
+        .cleanable(true)
+        .suffix(Label::new("%").text_sm())
+        .flex_1();
+    let alert_save_button = Button::new("save-alert-threshold")
+        .label("Save")
+        .on_click(cx.listener(|app, _event, window, cx| {
+            app.save_alert_settings(window, cx);
+        }));
+    let alert_controls = div()
+        .flex()
+        .items_end()
+        .gap(px(8.0))
+        .child(render_settings_input(
+            "Default alert threshold",
+            alert_threshold_input,
+            cx,
+        ))
+        .child(alert_save_button);
+
+    let alerts_section = render_settings_section(
+        "Alerts",
+        Some("Notify when remaining percentage is at or below the threshold."),
+        alert_controls.into_any_element(),
+        cx,
+    );
+
     let provider_section = render_settings_section(
         "Providers",
         Some("Enable providers and control their order."),
@@ -333,11 +360,12 @@ fn render_settings(app: &mut AgentStatsApp, cx: &mut Context<AgentStatsApp>) -> 
         .child(settings_header)
         .child(cadence_section)
         .child(display_section)
+        .child(alerts_section)
         .child(provider_section)
         .when(has_provider_settings, |this| {
             this.child(render_settings_group_header(
                 "Provider settings",
-                Some("Credentials and options for specific providers."),
+                Some("Credentials, alerts, and options for specific providers."),
                 cx,
             ))
             .child(provider_settings)
@@ -555,6 +583,19 @@ fn render_provider_settings_card(
         None
     };
 
+    let alert_threshold_input = if spec.show_alert_threshold {
+        Some(render_settings_input(
+            "Alert threshold",
+            Input::new(&form.alert_threshold_percent)
+                .cleanable(true)
+                .suffix(Label::new("%").text_sm())
+                .flex_1(),
+            cx,
+        ))
+    } else {
+        None
+    };
+
     let device_flow_section = if provider.config.id == ProviderId::Copilot {
         Some(render_copilot_device_flow_section(app, cx))
     } else {
@@ -579,6 +620,7 @@ fn render_provider_settings_card(
             .when_some(device_flow_section, |this, section| this.child(section))
             .when_some(region_input, |this, input| this.child(input))
             .when_some(workspace_input, |this, input| this.child(input))
+            .when_some(alert_threshold_input, |this, input| this.child(input))
             .when_some(token_accounts, |this, section| this.child(section))
             .into_any_element(),
     )

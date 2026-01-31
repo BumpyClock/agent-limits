@@ -116,3 +116,7 @@
   What I tried: Called `track_scroll` and `on_click` directly on `Div`.
   Outcome: Compile errors because those helpers require `Stateful` elements.
   Next time: Call `.id(...)` to get `Stateful<Div>` before using `track_scroll`, `overflow_y_scroll`, or `on_click`.
+- Context: Implemented limit alerts/notifications with per-provider overrides.
+  What I tried: Added alert threshold settings, cooldown per limit window using reset/bucket identity, and OS notifications via notify-rust.
+  Outcome: `cargo test -p agent-stats` passes with new alert logic tests.
+  Next time: Use reset timestamps when available; window-minute buckets are fallback for cooldown identity.

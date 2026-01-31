@@ -1,4 +1,6 @@
 mod forms;
+mod alerts;
+mod notifications;
 mod state;
 mod tray;
 mod types;
@@ -34,6 +36,7 @@ pub fn run() {
 
     app.run(|cx: &mut App| {
         gpui_component::init(cx);
+        notifications::init_notifications();
         cx.set_menus(app_menus());
         TrayController::init(cx);
         cx.bind_keys([
