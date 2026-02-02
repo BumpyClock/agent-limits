@@ -144,3 +144,39 @@ static PROVIDERS: Lazy<Vec<ProviderMetadata>> = Lazy::new(|| {
 pub fn provider_metadata() -> &'static [ProviderMetadata] {
     &PROVIDERS
 }
+
+pub fn provider_dashboard_url(provider_id: ProviderId) -> Option<&'static str> {
+    match provider_id {
+        ProviderId::Codex => Some("https://chatgpt.com/codex/settings/usage"),
+        ProviderId::Claude => Some("https://console.anthropic.com/settings/billing"),
+        ProviderId::Cursor => Some("https://cursor.com/dashboard?tab=usage"),
+        ProviderId::OpenCode => Some("https://opencode.ai"),
+        ProviderId::Factory => Some("https://app.factory.ai/settings/billing"),
+        ProviderId::Gemini => Some("https://gemini.google.com"),
+        ProviderId::Antigravity => None,
+        ProviderId::Copilot => Some("https://github.com/settings/copilot"),
+        ProviderId::Zai => Some("https://z.ai/manage-apikey/subscription"),
+        ProviderId::MiniMax => {
+            Some("https://platform.minimax.io/user-center/payment/coding-plan?cycle_type=3")
+        }
+        ProviderId::Kimi => Some("https://www.kimi.com/code/console"),
+        ProviderId::Kiro => Some("https://app.kiro.dev/account/usage"),
+        ProviderId::VertexAI => Some("https://console.cloud.google.com/vertex-ai"),
+        ProviderId::Augment => Some("https://app.augmentcode.com/account/subscription"),
+        ProviderId::JetBrains => None,
+        ProviderId::KimiK2 => Some("https://kimi-k2.ai/my-credits"),
+        ProviderId::Amp => Some("https://ampcode.com/settings"),
+        ProviderId::Synthetic => None,
+    }
+}
+
+pub fn provider_status_url(provider_id: ProviderId) -> Option<&'static str> {
+    match provider_id {
+        ProviderId::Codex => Some("https://status.openai.com/"),
+        ProviderId::Claude => Some("https://status.claude.com/"),
+        ProviderId::Cursor => Some("https://status.cursor.com"),
+        ProviderId::Factory => Some("https://status.factory.ai"),
+        ProviderId::Copilot => Some("https://www.githubstatus.com/"),
+        _ => None,
+    }
+}

@@ -2,14 +2,16 @@ use agent_stats_core::models::{
     ProviderErrorPayload, ProviderIdentitySnapshot, ProviderPayload, ProviderStatusIndicator,
     RateWindow, UsageSnapshot,
 };
-use agent_stats_core::provider_metadata::ProviderId;
+use agent_stats_core::provider_metadata::{
+    ProviderId, provider_dashboard_url, provider_status_url,
+};
 use agent_stats_core::token_accounts::{token_account_support, TokenAccountSupport};
 use gpui::{
     div, prelude::*, px, Animation, AnimationExt, AnyElement, App, ClipboardItem, Context, Hsla,
     Render, Window,
 };
 use gpui_component::animation::cubic_bezier;
-use gpui_component::button::Button;
+use gpui_component::button::{Button, ButtonVariant, ButtonVariants};
 use gpui_component::checkbox::Checkbox;
 use gpui_component::input::Input;
 use gpui_component::label::Label;
@@ -29,7 +31,7 @@ use super::forms::{
 use super::history;
 use super::state::AgentStatsApp;
 use super::types::{AppViewMode, CopilotDeviceFlowState, ProviderMoveDirection, ProviderState};
-use super::{About, KEY_CONTEXT, Minimize, OpenSettings, Refresh, Zoom};
+use super::{About, APP_TITLE, KEY_CONTEXT, Minimize, OpenSettings, Refresh, Zoom};
 use crate::settings::{AppSettings, RefreshCadence};
 
 impl Render for AgentStatsApp {
@@ -41,7 +43,7 @@ impl Render for AgentStatsApp {
         }
 
         let content: AnyElement = if self.view_mode == AppViewMode::Preview {
-            render_preview(self, cx)
+            render_preview(self, window, cx)
         } else if self.view_mode == AppViewMode::Settings {
             render_settings(self, cx)
         } else if self.view_mode == AppViewMode::History {
@@ -460,8 +462,25 @@ fn render_history(app: &mut AgentStatsApp, cx: &mut Context<AgentStatsApp>) -> A
         .into_any_element()
 }
 
-fn render_preview(app: &mut AgentStatsApp, cx: &mut Context<AgentStatsApp>) -> AnyElement {
+fn render_preview(
+    app: &mut AgentStatsApp,
+    window: &mut Window,
+    cx: &mut Context<AgentStatsApp>,
+) -> AnyElement {
     let now = OffsetDateTime::now_utc();
+    if let Some(handle) = app.preview_focus_handle.as_ref() {
+        if !handle.is_focused(window) {
+            handle.focus(window, cx);
+        }
+    }
+    if app.preview_focus_subscription.is_none() {
+        if let Some(handle) = app.preview_focus_handle.as_ref().cloned() {
+            app.preview_focus_subscription =
+                Some(window.on_focus_out(&handle, cx, |_event, window, _cx| {
+                    window.remove_window();
+                }));
+        }
+    }
     let enabled_providers: Vec<&ProviderState> = app
         .providers
         .iter()
@@ -511,25 +530,12 @@ fn render_preview(app: &mut AgentStatsApp, cx: &mut Context<AgentStatsApp>) -> A
             if let Some(provider_id) = provider_ids_for_click.get(*ix).copied() {
                 app.preview_active_provider = Some(provider_id);
                 cx.notify();
-                super::open_main_window_for_provider(provider_id, cx);
             }
         }))
         .children(
             enabled_providers
                 .iter()
                 .map(|provider| Tab::new().label(provider.metadata.display_name)),
-        );
-
-    let preview_actions = div()
-        .flex()
-        .items_center()
-        .gap(px(6.0))
-        .child(
-            Button::new("preview-settings")
-                .label("Settings")
-                .on_click(cx.listener(|_app, _event, _window, cx| {
-                    super::open_or_create_settings_window(cx);
-                })),
         );
 
     let selected_provider = active_provider.and_then(|provider_id| {
@@ -550,7 +556,118 @@ fn render_preview(app: &mut AgentStatsApp, cx: &mut Context<AgentStatsApp>) -> A
             .into_any_element()
     };
 
-    div()
+    let mut quick_actions: Vec<AnyElement> = Vec::new();
+    let mut provider_urls: (Option<&'static str>, Option<&'static str>) = (None, None);
+
+    quick_actions.push(
+        preview_action_button("preview-refresh", "Refresh")
+            .disabled(app.refreshing)
+            .on_click(cx.listener(|app, _event, _window, cx| {
+                app.refresh_now(cx);
+            }))
+            .into_any_element(),
+    );
+
+    if let Some(provider_id) = active_provider {
+        quick_actions.push(
+            preview_action_button("preview-open-window", "Open Window")
+                .on_click(cx.listener(move |_app, _event, _window, cx| {
+                    super::open_main_window_for_provider(provider_id, cx);
+                    super::close_preview_window(cx);
+                }))
+                .into_any_element(),
+        );
+    }
+
+    if let Some(provider) = selected_provider {
+        provider_urls = (
+            provider_dashboard_url(provider.config.id),
+            provider_status_url(provider.config.id),
+        );
+        let has_settings = provider_settings_spec(provider.config.id).is_visible();
+        if has_settings {
+            quick_actions.push(
+                preview_action_button("preview-switch-account", "Switch Account...")
+                    .on_click(cx.listener(|_app, _event, _window, cx| {
+                        super::open_or_create_settings_window(cx);
+                        super::close_preview_window(cx);
+                    }))
+                    .into_any_element(),
+            );
+        }
+    }
+
+    if let Some(url) = provider_urls.0 {
+        let url = url.to_string();
+        quick_actions.push(
+            preview_action_button("preview-dashboard", "Usage Dashboard")
+                .on_click(cx.listener(move |_app, _event, _window, cx| {
+                    cx.open_url(&url);
+                    super::close_preview_window(cx);
+                }))
+                .into_any_element(),
+        );
+    }
+
+    if let Some(provider) = selected_provider {
+        let payload = provider.payload.as_ref();
+        let status_url = payload
+            .and_then(|payload| payload.status.as_ref())
+            .map(|status| status.url.as_str())
+            .or(provider_urls.1);
+        if let Some(url) = status_url {
+            let url = url.to_string();
+            quick_actions.push(
+                preview_action_button("preview-status", "Status Page")
+                    .on_click(cx.listener(move |_app, _event, _window, cx| {
+                        cx.open_url(&url);
+                        super::close_preview_window(cx);
+                    }))
+                    .into_any_element(),
+            );
+        }
+    }
+
+    let quick_actions_section = if quick_actions.is_empty() {
+        None
+    } else {
+        Some(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(2.0))
+                .children(quick_actions)
+                .into_any_element(),
+        )
+    };
+
+    let footer_actions = div()
+        .flex()
+        .flex_col()
+        .gap(px(2.0))
+        .child(
+            preview_action_button("preview-settings", "Settings...")
+                .on_click(cx.listener(|_app, _event, _window, cx| {
+                    super::open_or_create_settings_window(cx);
+                    super::close_preview_window(cx);
+                })),
+        )
+        .child(
+            preview_action_button("preview-about", &format!("About {APP_TITLE}"))
+                .on_click(cx.listener(|app, _event, window, cx| {
+                    app.open_about_dialog(window, cx);
+                    super::close_preview_window(cx);
+                })),
+        )
+        .child(
+            preview_action_button("preview-quit", "Quit")
+                .on_click(cx.listener(|_app, _event, _window, cx| {
+                    cx.quit();
+                })),
+        );
+
+    let focus_handle = app.preview_focus_handle.clone();
+    let panel = div()
         .size_full()
         .flex()
         .flex_col()
@@ -562,11 +679,51 @@ fn render_preview(app: &mut AgentStatsApp, cx: &mut Context<AgentStatsApp>) -> A
                 .flex()
                 .items_center()
                 .gap(px(8.0))
-                .child(tabs)
-                .child(preview_actions),
+                .child(tabs),
         )
         .child(body)
-        .into_any_element()
+        .when_some(quick_actions_section, |this, section| {
+            this.child(section_divider(cx)).child(section)
+        })
+        .child(section_divider(cx))
+        .child(footer_actions);
+
+    let container = div()
+        .size_full()
+        .paddings(px(6.0))
+        .child(
+            div()
+                .size_full()
+                .bg(cx.theme().background)
+                .border_1()
+                .border_color(cx.theme().border)
+                .rounded_lg()
+                .shadow_lg()
+                .overflow_hidden()
+                .child(panel),
+        )
+        ;
+
+    if let Some(handle) = focus_handle.as_ref() {
+        container.track_focus(handle).into_any_element()
+    } else {
+        container.into_any_element()
+    }
+}
+
+fn preview_action_button(id: &str, label: &str) -> Button {
+    Button::new(id.to_string())
+        .with_variant(ButtonVariant::Text)
+        .with_size(Size::Small)
+        .w_full()
+        .child(
+            div()
+                .w_full()
+                .flex()
+                .items_center()
+                .justify_start()
+                .child(Label::new(label.to_string()).text_sm()),
+        )
 }
 
 fn render_provider_settings_card(
@@ -1441,10 +1598,6 @@ fn render_preview_rate_window(
         .flex()
         .flex_col()
         .gap(px(4.0))
-        .cursor_pointer()
-        .on_click(move |_event, _window, cx| {
-            super::open_main_window_for_provider(provider_id, cx);
-        })
         .child(
             div()
                 .flex()

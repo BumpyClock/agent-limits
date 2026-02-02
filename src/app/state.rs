@@ -6,7 +6,8 @@ use agent_stats_core::models::ProviderPayload;
 use agent_stats_core::provider_metadata::{ProviderId, ProviderMetadata, provider_metadata};
 use agent_stats_core::{DeviceFlowPollResult, poll_for_token, request_device_code};
 use gpui::{
-    AppContext, AsyncApp, Context, Entity, ParentElement, ScrollHandle, Task, WeakEntity, Window,
+    AppContext, AsyncApp, Context, Entity, FocusHandle, ParentElement, ScrollHandle, Subscription,
+    Task, WeakEntity, Window,
 };
 use gpui_component::label::Label;
 use gpui_component::input::InputState;
@@ -45,6 +46,8 @@ pub(crate) struct AgentStatsApp {
     pub(crate) pending_main_provider_focus: Option<ProviderId>,
     pub(crate) history_range_days: u32,
     pub(crate) history_scroll_handle: ScrollHandle,
+    pub(crate) preview_focus_handle: Option<FocusHandle>,
+    pub(crate) preview_focus_subscription: Option<Subscription>,
 }
 
 impl AgentStatsApp {
@@ -85,6 +88,11 @@ impl AgentStatsApp {
             None
         };
 
+        let preview_focus_handle = if view_mode == AppViewMode::Preview {
+            Some(cx.focus_handle())
+        } else {
+            None
+        };
         let mut app = Self {
             providers,
             config,
@@ -105,11 +113,14 @@ impl AgentStatsApp {
             pending_main_provider_focus,
             history_range_days: 30,
             history_scroll_handle: ScrollHandle::new(),
+            preview_focus_handle,
+            preview_focus_subscription: None,
         };
         if view_mode != AppViewMode::Settings {
             app.schedule_refresh_loop(cx);
             app.refresh_now(cx);
         }
+        super::tray::sync_tray_from_app(&app, cx);
         app
     }
 
@@ -145,6 +156,7 @@ impl AgentStatsApp {
             self.schedule_refresh_loop(cx);
             self.refresh_now(cx);
         }
+        super::tray::sync_tray_from_app(self, cx);
         cx.notify();
     }
 
@@ -191,6 +203,7 @@ impl AgentStatsApp {
         self.refreshing = true;
         self.error = None;
         cx.notify();
+        super::tray::sync_tray_from_app(self, cx);
 
         let include_status = self.settings.include_status;
         let backend_mode =
@@ -226,10 +239,12 @@ impl AgentStatsApp {
                             super::alerts::handle_limit_alerts(&app.providers, &app.settings);
                             app.error = None;
                             app.last_refresh = Some(OffsetDateTime::now_utc());
+                            super::tray::sync_tray_from_app(app, cx);
                             Some((payloads, app.settings.history_retention_days))
                         }
                         Err(error) => {
                             app.error = Some(error.to_string());
+                            super::tray::sync_tray_from_app(app, cx);
                             None
                         }
                     };
@@ -277,6 +292,7 @@ impl AgentStatsApp {
             self.config.clone(),
             cx,
         );
+        super::tray::sync_tray_from_app(self, cx);
         cx.notify();
     }
 
@@ -621,6 +637,7 @@ impl AgentStatsApp {
             self.config.clone(),
             cx,
         );
+        super::tray::sync_tray_from_app(self, cx);
         cx.notify();
     }
 
