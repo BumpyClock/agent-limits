@@ -128,3 +128,7 @@
   What I tried: Snapshotted provider payloads on refresh, stored in ~/.agent-stats/history.json with configurable retention, and trimmed on write; added a focused retention test.
   Outcome: `cargo test -p agent-stats snapshots_are_trimmed_to_the_retention_window` passes.
   Next time: Keep history I/O off the UI thread by background-spawning writes.
+- Context: Windows build broke in `gpui-component` title bar drag.
+  What I tried: Used `_window.window_handle()` + `UI::WindowsAndMessaging::ReleaseCapture` + old `SendMessageW` args.
+  Outcome: Compile errors (inherent `Window::window_handle()` returns `gpui::AnyWindowHandle`; `ReleaseCapture` moved; `SendMessageW` now takes `Option` params).
+  Next time: Use UFCS `<Window as raw_window_handle::HasWindowHandle>::window_handle(...)`, import `ReleaseCapture` from `Win32::UI::Input::KeyboardAndMouse`, wrap `SendMessageW` args in `Some(...)`.
