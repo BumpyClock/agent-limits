@@ -3,12 +3,12 @@ use agent_stats_core::models::{
     RateWindow, UsageSnapshot,
 };
 use agent_stats_core::provider_metadata::{
-    ProviderId, provider_dashboard_url, provider_status_url,
+    ProviderId, provider_dashboard_url, provider_icon_path, provider_status_url,
 };
 use agent_stats_core::token_accounts::{token_account_support, TokenAccountSupport};
 use gpui::{
-    div, prelude::*, px, Animation, AnimationExt, AnyElement, App, ClipboardItem, Context, Hsla,
-    Render, Window,
+    div, prelude::*, px, size, svg, Animation, AnimationExt, AnyElement, App, Bounds,
+    ClipboardItem, Context, Hsla, Pixels, Render, Window,
 };
 use gpui_component::animation::cubic_bezier;
 use gpui_component::button::{Button, ButtonVariant, ButtonVariants};
@@ -532,11 +532,20 @@ fn render_preview(
                 cx.notify();
             }
         }))
-        .children(
-            enabled_providers
-                .iter()
-                .map(|provider| Tab::new().label(provider.metadata.display_name)),
-        );
+        .children(enabled_providers.iter().map(|provider| {
+            Tab::new().child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .child(provider_icon(
+                        provider.metadata.id,
+                        Size::Small,
+                        cx.theme().tab_foreground,
+                    ))
+                    .child(Label::new(provider.metadata.display_name).text_sm()),
+            )
+        }));
 
     let selected_provider = active_provider.and_then(|provider_id| {
         enabled_providers
@@ -667,12 +676,23 @@ fn render_preview(
         );
 
     let focus_handle = app.preview_focus_handle.clone();
+    let allow_resize = app
+        .preview_focus_handle
+        .as_ref()
+        .map(|handle| handle.is_focused(window))
+        .unwrap_or(true);
+
     let panel = div()
         .size_full()
         .flex()
         .flex_col()
         .gap(px(10.0))
         .paddings(px(12.0))
+        .on_children_prepainted(move |bounds, window, cx| {
+            if allow_resize {
+                update_preview_window_height(bounds, window, cx);
+            }
+        })
         .overflow_y_scrollbar()
         .child(
             div()
@@ -724,6 +744,41 @@ fn preview_action_button(id: &str, label: &str) -> Button {
                 .justify_start()
                 .child(Label::new(label.to_string()).text_sm()),
         )
+}
+
+fn update_preview_window_height(
+    children_bounds: Vec<Bounds<Pixels>>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    if children_bounds.is_empty() {
+        return;
+    }
+
+    let mut max_bottom = 0.0_f32;
+    for bounds in children_bounds {
+        let bottom = bounds.origin.y + bounds.size.height;
+        max_bottom = max_bottom.max(f32::from(bottom));
+    }
+
+    let outer_padding = 6.0_f32;
+    let panel_padding = 12.0_f32;
+    let desired_height = max_bottom + outer_padding + panel_padding;
+
+    let mut max_height = window
+        .display(cx)
+        .map(|display| f32::from(display.visible_bounds().size.height))
+        .unwrap_or(640.0);
+    max_height = max_height.min(640.0);
+
+    let min_height = 240.0_f32;
+    let clamped_height = desired_height.clamp(min_height, max_height);
+    let current_height = f32::from(window.bounds().size.height);
+
+    if (current_height - clamped_height).abs() > 1.0 {
+        let width = window.bounds().size.width;
+        window.resize(size(width, px(clamped_height)));
+    }
 }
 
 fn render_provider_settings_card(
@@ -1384,6 +1439,21 @@ fn provider_display_name(provider_id: &str) -> String {
         .unwrap_or_else(|_| provider_id.to_string())
 }
 
+fn provider_icon(provider_id: ProviderId, size: Size, color: Hsla) -> AnyElement {
+    let icon = svg()
+        .flex_none()
+        .path(provider_icon_path(provider_id))
+        .text_color(color);
+    match size {
+        Size::XSmall => icon.size_3(),
+        Size::Small => icon.size_3p5(),
+        Size::Medium => icon.size_4(),
+        Size::Large => icon.size_6(),
+        Size::Size(px) => icon.size(px),
+    }
+    .into_any_element()
+}
+
 fn format_history_range_label(start: Date, end: Date, range_days: u32) -> String {
     let start_label = format_history_day(start);
     let end_label = format_history_day(end);
@@ -1426,9 +1496,20 @@ fn render_preview_provider_card(
         .items_center()
         .justify_between()
         .child(
-            Label::new(provider.metadata.display_name)
-                .text_sm()
-                .font_semibold(),
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .child(provider_icon(
+                    provider.metadata.id,
+                    Size::Small,
+                    cx.theme().foreground,
+                ))
+                .child(
+                    Label::new(provider.metadata.display_name)
+                        .text_sm()
+                        .font_semibold(),
+                ),
         )
         .child(
             div()
@@ -1698,9 +1779,20 @@ fn render_provider_card(
         .items_center()
         .justify_between()
         .child(
-            Label::new(provider.metadata.display_name)
-                .text_lg()
-                .font_semibold(),
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .child(provider_icon(
+                    provider.metadata.id,
+                    Size::Medium,
+                    cx.theme().foreground,
+                ))
+                .child(
+                    Label::new(provider.metadata.display_name)
+                        .text_lg()
+                        .font_semibold(),
+                ),
         )
         .when_some(account_label, |this, label| this.child(label));
 

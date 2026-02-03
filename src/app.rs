@@ -17,7 +17,8 @@ use gpui::{
 };
 use gpui_component::Root;
 
-use self::state::AgentStatsApp;
+use self::state::{AgentStatsApp, SharedUsageState, SharedUsageSnapshot};
+use crate::assets::Assets;
 use self::tray::TrayController;
 use self::types::AppViewMode;
 
@@ -25,7 +26,9 @@ pub fn run() {
     let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .try_init();
 
-    let app = Application::new().with_quit_mode(QuitMode::Explicit);
+    let app = Application::new()
+        .with_assets(Assets)
+        .with_quit_mode(QuitMode::Explicit);
 
     app.on_reopen(|cx| {
         if cx.windows().is_empty() {
@@ -40,6 +43,7 @@ pub fn run() {
     app.run(|cx: &mut App| {
         gpui_component::init(cx);
         notifications::init_notifications();
+        cx.set_global(SharedUsageState::default());
         cx.set_menus(app_menus());
         TrayController::init(cx);
         cx.bind_keys([
@@ -236,6 +240,30 @@ pub(crate) fn sync_windows_after_settings_change(
         let config = config.clone();
         let _ = update_app_by_mode(cx, mode, |app, window, cx| {
             app.apply_state_update(settings, config, window, cx);
+        });
+    }
+}
+
+pub(crate) fn sync_windows_after_usage_change(
+    current_mode: AppViewMode,
+    snapshot: SharedUsageSnapshot,
+    cx: &mut App,
+) {
+    let modes = [
+        AppViewMode::Main,
+        AppViewMode::Preview,
+        AppViewMode::Settings,
+        AppViewMode::History,
+    ];
+    for mode in modes {
+        if mode == current_mode {
+            continue;
+        }
+        let snapshot = snapshot.clone();
+        let _ = update_app_by_mode(cx, mode, |app, _window, cx| {
+            app.apply_shared_snapshot(&snapshot);
+            tray::sync_tray_from_app(app, cx);
+            cx.notify();
         });
     }
 }

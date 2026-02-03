@@ -6,8 +6,8 @@ use agent_stats_core::models::ProviderPayload;
 use agent_stats_core::provider_metadata::{ProviderId, ProviderMetadata, provider_metadata};
 use agent_stats_core::{DeviceFlowPollResult, poll_for_token, request_device_code};
 use gpui::{
-    AppContext, AsyncApp, Context, Entity, FocusHandle, ParentElement, ScrollHandle, Subscription,
-    Task, WeakEntity, Window,
+    AppContext, AsyncApp, Context, Entity, FocusHandle, Global, ParentElement, ScrollHandle,
+    Subscription, Task, WeakEntity, Window,
 };
 use gpui_component::label::Label;
 use gpui_component::input::InputState;
@@ -48,6 +48,35 @@ pub(crate) struct AgentStatsApp {
     pub(crate) history_scroll_handle: ScrollHandle,
     pub(crate) preview_focus_handle: Option<FocusHandle>,
     pub(crate) preview_focus_subscription: Option<Subscription>,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct SharedUsageSnapshot {
+    pub(crate) payloads: HashMap<String, ProviderPayload>,
+    pub(crate) last_refresh: Option<OffsetDateTime>,
+    pub(crate) refreshing: bool,
+    pub(crate) error: Option<String>,
+}
+
+#[derive(Default)]
+pub(crate) struct SharedUsageState {
+    payloads: HashMap<String, ProviderPayload>,
+    last_refresh: Option<OffsetDateTime>,
+    refreshing: bool,
+    error: Option<String>,
+}
+
+impl Global for SharedUsageState {}
+
+impl SharedUsageState {
+    fn snapshot(&self) -> SharedUsageSnapshot {
+        SharedUsageSnapshot {
+            payloads: self.payloads.clone(),
+            last_refresh: self.last_refresh,
+            refreshing: self.refreshing,
+            error: self.error.clone(),
+        }
+    }
 }
 
 impl AgentStatsApp {
@@ -93,6 +122,9 @@ impl AgentStatsApp {
         } else {
             None
         };
+        let shared_snapshot = cx
+            .try_global::<SharedUsageState>()
+            .map(|state| state.snapshot());
         let mut app = Self {
             providers,
             config,
@@ -116,9 +148,21 @@ impl AgentStatsApp {
             preview_focus_handle,
             preview_focus_subscription: None,
         };
+        if let Some(snapshot) = shared_snapshot.as_ref() {
+            app.apply_shared_snapshot(snapshot);
+        }
         if view_mode != AppViewMode::Settings {
-            app.schedule_refresh_loop(cx);
-            app.refresh_now(cx);
+            let should_refresh = match view_mode {
+                AppViewMode::Main => true,
+                _ => shared_snapshot
+                    .as_ref()
+                    .map(|snapshot| snapshot.payloads.is_empty())
+                    .unwrap_or(true),
+            };
+            if should_refresh {
+                app.schedule_refresh_loop(cx);
+                app.refresh_now(cx);
+            }
         }
         super::tray::sync_tray_from_app(&app, cx);
         app
@@ -152,9 +196,24 @@ impl AgentStatsApp {
                 })
                 .map(|provider| provider.config.id);
         }
+        let shared_snapshot = cx
+            .try_global::<SharedUsageState>()
+            .map(|state| state.snapshot());
+        if let Some(snapshot) = shared_snapshot.as_ref() {
+            self.apply_shared_snapshot(snapshot);
+        }
         if self.view_mode != AppViewMode::Settings {
-            self.schedule_refresh_loop(cx);
-            self.refresh_now(cx);
+            let should_refresh = match self.view_mode {
+                AppViewMode::Main => true,
+                _ => shared_snapshot
+                    .as_ref()
+                    .map(|snapshot| snapshot.payloads.is_empty())
+                    .unwrap_or(true),
+            };
+            if should_refresh {
+                self.schedule_refresh_loop(cx);
+                self.refresh_now(cx);
+            }
         }
         super::tray::sync_tray_from_app(self, cx);
         cx.notify();
@@ -200,10 +259,31 @@ impl AgentStatsApp {
         if self.refreshing {
             return;
         }
-        self.refreshing = true;
-        self.error = None;
+
+        if let Some(snapshot) = cx
+            .try_global::<SharedUsageState>()
+            .map(|state| state.snapshot())
+        {
+            if snapshot.refreshing {
+                self.apply_shared_snapshot(&snapshot);
+                cx.notify();
+                return;
+            }
+        }
+
+        if cx.try_global::<SharedUsageState>().is_none() {
+            cx.set_global(SharedUsageState::default());
+        }
+        let snapshot = {
+            let shared = cx.global_mut::<SharedUsageState>();
+            shared.refreshing = true;
+            shared.error = None;
+            shared.snapshot()
+        };
+        self.apply_shared_snapshot(&snapshot);
         cx.notify();
         super::tray::sync_tray_from_app(self, cx);
+        schedule_usage_sync(self.view_mode, snapshot.clone(), cx);
 
         let include_status = self.settings.include_status;
         let backend_mode =
@@ -225,9 +305,8 @@ impl AgentStatsApp {
             let mut cx = cx.clone();
             async move {
                 let result = task.await;
-                let history_request = match this.update(&mut cx, |app, cx| {
-                    app.refreshing = false;
-                    let history_request = match result {
+                let refresh_update = match this.update(&mut cx, |app, cx| {
+                    let update_result = match result {
                         Ok(fetch_result) => {
                             let payloads = fetch_result.payloads;
                             let payload_map = payloads
@@ -235,30 +314,53 @@ impl AgentStatsApp {
                                 .cloned()
                                 .map(|payload| (payload.provider.clone(), payload))
                                 .collect::<HashMap<_, _>>();
-                            app.update_payloads(payload_map);
+                            let snapshot = {
+                                let shared = cx.global_mut::<SharedUsageState>();
+                                shared.payloads = payload_map.clone();
+                                shared.last_refresh = Some(OffsetDateTime::now_utc());
+                                shared.refreshing = false;
+                                shared.error = None;
+                                shared.snapshot()
+                            };
+                            app.apply_shared_snapshot(&snapshot);
                             super::alerts::handle_limit_alerts(&app.providers, &app.settings);
-                            app.error = None;
-                            app.last_refresh = Some(OffsetDateTime::now_utc());
                             super::tray::sync_tray_from_app(app, cx);
-                            Some((payloads, app.settings.history_retention_days))
+                            (
+                                Some((payloads, app.settings.history_retention_days)),
+                                Some((app.view_mode, snapshot)),
+                            )
                         }
                         Err(error) => {
-                            app.error = Some(error.to_string());
+                            let snapshot = {
+                                let shared = cx.global_mut::<SharedUsageState>();
+                                shared.refreshing = false;
+                                shared.error = Some(error.to_string());
+                                shared.snapshot()
+                            };
+                            app.apply_shared_snapshot(&snapshot);
                             super::tray::sync_tray_from_app(app, cx);
-                            None
+                            (None, Some((app.view_mode, snapshot)))
                         }
                     };
                     cx.notify();
-                    history_request
+                    update_result
                 }) {
-                    Ok(history_request) => history_request,
+                    Ok(update_result) => update_result,
                     Err(error) => {
                         log::error!("Refresh result update failed: {error}");
-                        None
+                        (None, None)
                     }
                 };
 
-                if let Some((payloads, retention_days)) = history_request {
+                let (history_payloads, sync_payload) = refresh_update;
+
+                if let Some((view_mode, snapshot)) = sync_payload {
+                    cx.update(|cx| {
+                        super::sync_windows_after_usage_change(view_mode, snapshot, cx);
+                    });
+                }
+
+                if let Some((payloads, retention_days)) = history_payloads {
                     let task = cx.background_spawn(async move {
                         if let Err(error) = history::snapshot_usage(&payloads, retention_days) {
                             log::error!("Failed to save history: {error}");
@@ -278,12 +380,19 @@ impl AgentStatsApp {
         }
     }
 
+    pub(crate) fn apply_shared_snapshot(&mut self, snapshot: &SharedUsageSnapshot) {
+        self.update_payloads(snapshot.payloads.clone());
+        self.last_refresh = snapshot.last_refresh;
+        self.refreshing = snapshot.refreshing;
+        self.error = snapshot.error.clone();
+    }
+
     pub(crate) fn update_setting(&mut self, settings: AppSettings, cx: &mut Context<Self>) {
         self.settings = settings;
         if let Err(error) = self.settings.save() {
             log::error!("Failed to save settings: {error}");
         }
-        if self.view_mode != AppViewMode::Settings {
+        if self.view_mode == AppViewMode::Main {
             self.schedule_refresh_loop(cx);
         }
         super::sync_windows_after_settings_change(
@@ -796,6 +905,20 @@ impl AgentStatsApp {
         self.copilot_device_flow_task = None;
         cx.notify();
     }
+}
+
+fn schedule_usage_sync(
+    view_mode: AppViewMode,
+    snapshot: SharedUsageSnapshot,
+    cx: &mut Context<AgentStatsApp>,
+) {
+    cx.spawn(move |_this, cx: &mut AsyncApp| {
+        cx.update(|cx| {
+            super::sync_windows_after_usage_change(view_mode, snapshot, cx);
+        });
+        async move {}
+    })
+    .detach();
 }
 
 fn move_provider_in_config(

@@ -180,3 +180,26 @@ pub fn provider_status_url(provider_id: ProviderId) -> Option<&'static str> {
         _ => None,
     }
 }
+
+pub fn provider_icon_path(provider_id: ProviderId) -> &'static str {
+    match provider_id {
+        ProviderId::Codex => "providers/ProviderIcon-codex.svg",
+        ProviderId::Claude => "providers/ProviderIcon-claude.svg",
+        ProviderId::Cursor => "providers/ProviderIcon-cursor.svg",
+        ProviderId::OpenCode => "providers/ProviderIcon-opencode.svg",
+        ProviderId::Factory => "providers/ProviderIcon-factory.svg",
+        ProviderId::Gemini => "providers/ProviderIcon-gemini.svg",
+        ProviderId::Antigravity => "providers/ProviderIcon-antigravity.svg",
+        ProviderId::Copilot => "providers/ProviderIcon-copilot.svg",
+        ProviderId::Zai => "providers/ProviderIcon-zai.svg",
+        ProviderId::MiniMax => "providers/ProviderIcon-minimax.svg",
+        ProviderId::Kimi => "providers/ProviderIcon-kimi.svg",
+        ProviderId::Kiro => "providers/ProviderIcon-kiro.svg",
+        ProviderId::VertexAI => "providers/ProviderIcon-vertexai.svg",
+        ProviderId::Augment => "providers/ProviderIcon-augment.svg",
+        ProviderId::JetBrains => "providers/ProviderIcon-jetbrains.svg",
+        ProviderId::KimiK2 => "providers/ProviderIcon-kimi.svg",
+        ProviderId::Amp => "providers/ProviderIcon-amp.svg",
+        ProviderId::Synthetic => "providers/ProviderIcon-synthetic.svg",
+    }
+}

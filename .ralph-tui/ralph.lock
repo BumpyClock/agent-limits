@@ -1,7 +1,7 @@
 {
-  "pid": 27777,
-  "sessionId": "3699b7b6-90cd-4d2a-91f6-7d4485d9c228",
-  "acquiredAt": "2026-01-31T03:00:00.960Z",
+  "pid": 10967,
+  "sessionId": "574d434d-8e69-4109-a389-56936be09163",
+  "acquiredAt": "2026-02-03T03:02:36.456Z",
   "cwd": "/Users/adityasharma/Projects/agent-limits",
-  "hostname": "MacBookPro.local"
+  "hostname": "Adityas-MacBook-Pro.local"
 }
