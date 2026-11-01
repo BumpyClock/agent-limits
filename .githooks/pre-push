@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+# Validate the pushed commit, never a different or partially edited checkout.
+head=$(git rev-parse HEAD)
+required=0
+updates=0
+paths=$(mktemp)
+trap 'rm -f "$paths"' EXIT
+while read -r local_ref local_oid remote_ref remote_oid extra || [[ -n ${local_ref:-}${local_oid:-}${remote_ref:-}${remote_oid:-}${extra:-} ]]; do
+  updates=1
+  if [[ -n ${extra:-} || ! $local_oid =~ ^[0-9a-f]+$ || ! $remote_oid =~ ^[0-9a-f]+$ || ${#local_oid} != ${#head} || ${#remote_oid} != ${#head} ]]; then
+    echo 'Invalid pre-push input; no checks skipped.' >&2; exit 1
+  fi
+  [[ $local_oid =~ ^0+$ ]] && continue
+  commit=$(git rev-parse --verify "$local_oid^{commit}")
+  if [[ $commit != "$head" ]]; then
+    echo 'Push only checked-out HEAD. Validate other refs in their own clean checkout.' >&2; exit 1
+  fi
+  if [[ $remote_oid =~ ^0+$ ]] || ! base=$(git rev-parse --verify "$remote_oid^{commit}" 2>/dev/null); then
+    required=1
+    continue
+  fi
+  git diff --no-ext-diff --name-only --no-renames -z "$base" "$commit" > "$paths"
+  # Empty/unknown ranges broaden to full automation checks.
+  [[ -s $paths ]] || required=1
+  while IFS= read -r -d '' path; do
+    required=1
+  done < "$paths"
+done
+[[ $updates == 1 ]] || required=1
+[[ $required == 1 ]] || exit 0
+checkout_status=$(git status --porcelain --untracked-files=normal)
+if [[ -n $checkout_status ]]; then
+  echo 'Automation checks require a clean checkout of pushed HEAD. No stashing or rewriting is performed.' >&2; exit 1
+fi
+exec bash scripts/hooks/check.sh
